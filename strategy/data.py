@@ -58,7 +58,7 @@ def load(data_dir: str | Path = "data") -> pd.DataFrame:
     return all_df.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
 
 
-def fetch_live(symbols: list[str] | None = None, lookback_days: int = 400) -> pd.DataFrame:
+def fetch_live(symbols: list[str] | None = None, lookback_days: int = 600) -> pd.DataFrame:
     """Fetch recent daily prices from Yahoo Finance for live signal computation."""
     from datetime import datetime, timedelta
 
