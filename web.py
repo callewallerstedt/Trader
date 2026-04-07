@@ -87,11 +87,12 @@ def _get_ibkr_status() -> dict:
         currency = broker.get_currency()
         positions = broker.get_positions()
         summary = broker.get_account_summary()
-        broker.disconnect()
 
         fx_rate = 1.0
         if currency.upper() != "USD":
             fx_rate = broker.get_fx_rate("USD")
+
+        broker.disconnect()
 
         return {
             "connected": True,
