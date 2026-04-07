@@ -3,7 +3,9 @@
 cd "$(dirname "$0")"
 source .venv/bin/activate
 
-echo "$(date) - Starting daily run" >> trade.log
+echo "========================================" >> trade.log
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting daily trade run" >> trade.log
 python run.py trade --live >> trade.log 2>&1
-echo "$(date) - Done" >> trade.log
-echo "---" >> trade.log
+EXIT_CODE=$?
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Finished (exit code: $EXIT_CODE)" >> trade.log
+echo "========================================" >> trade.log

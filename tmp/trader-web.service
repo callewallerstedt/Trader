@@ -1,0 +1,15 @@
+[Unit]
+Description=Momentum Rotation Bot Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=calle
+WorkingDirectory=/home/calle/Trader
+ExecStart=/home/calle/Trader/.venv/bin/python web.py
+Restart=always
+RestartSec=5
+Environment=PORT=8080
+
+[Install]
+WantedBy=multi-user.target

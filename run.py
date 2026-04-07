@@ -12,26 +12,40 @@ Usage:
 from __future__ import annotations
 
 import json
+import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+
+LOG_DIR = Path("logs")
+LOG_DIR.mkdir(exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(LOG_DIR / "bot.log"),
+    ],
+)
+log = logging.getLogger("trader")
 
 
 def cmd_download():
     from strategy.data import download
-    print("Downloading daily data from Yahoo Finance...")
+    log.info("Downloading daily data from Yahoo Finance...")
     download()
-    print("Done.")
+    log.info("Download complete.")
 
 
 def cmd_backtest():
     from strategy.data import load
     from strategy.engine import Config, backtest
 
-    print("Loading data...")
+    log.info("Loading data...")
     daily = load()
     syms = sorted(daily["symbol"].unique())
-    print(f"  {len(syms)} symbols, {daily['timestamp'].dt.date.nunique()} trading days")
+    log.info(f"  {len(syms)} symbols, {daily['timestamp'].dt.date.nunique()} trading days")
 
     config = Config()
     m = backtest(daily, config)
@@ -54,17 +68,20 @@ def cmd_signal():
     from strategy.data import fetch_live
     from strategy.engine import Config, compute_signal
 
-    print("Fetching live prices...")
+    log.info("Fetching live prices...")
     daily = fetch_live()
     signal = compute_signal(daily, Config())
 
-    print(f"\nDate:    {signal.get('date', '?')}")
-    print(f"SPY:     ${signal.get('spy_price', 0):.2f}")
-    print(f"SMA:     ${signal.get('spy_sma', 0):.2f}")
-    print(f"Trend:   {signal.get('trend', '?')}")
-    print(f"Action:  {signal.get('action', '?')}")
+    print(f"\nDate:      {signal.get('date', '?')}")
+    print(f"SPY:       ${signal.get('spy_price', 0):.2f}")
+    print(f"SMA(100):  ${signal.get('spy_sma', 0):.2f}")
+    print(f"SPY vs SMA:{signal.get('spy_pct_vs_sma', 0):+.2f}%")
+    print(f"Trend:     {signal.get('trend', '?')} ({signal.get('days_in_regime', '?')} days)")
+    print(f"Exposure:  {signal.get('exposure', 1):.1%}")
+    print(f"Vol (ann): {signal.get('realized_vol', 0):.1f}%")
+    print(f"Action:    {signal.get('action', '?')}")
     if signal.get("target_holdings"):
-        print(f"Hold:    {', '.join(signal['target_holdings'])}")
+        print(f"Hold:      {', '.join(signal['target_holdings'])}")
     if signal.get("momentum_scores"):
         print(f"\nTop 10 by momentum:")
         for sym, score in signal["momentum_scores"].items():
@@ -77,84 +94,161 @@ def cmd_trade(live: bool = False):
     from broker.ibkr import IBKRBroker, OrderRequest
 
     config = Config()
-    log_dir = Path("logs")
-    log_dir.mkdir(exist_ok=True)
-
-    # 1. Fetch prices and compute signal
-    print("Fetching live prices...")
-    daily = fetch_live()
-    signal = compute_signal(daily, config)
-
-    print(f"[{signal.get('date', '?')}] SPY=${signal.get('spy_price', 0):.2f} "
-          f"SMA=${signal.get('spy_sma', 0):.2f} Trend={signal.get('trend', '?')}")
-    print(f"  Action: {signal.get('action', '?')}")
-
-    if signal["action"] not in ("hold", "go_to_cash"):
-        print(f"  Reason: {signal.get('reason', '?')}")
-        return
-
-    target = set(signal.get("target_holdings", []))
-
-    # 2. Connect to IBKR (only if live)
-    broker = IBKRBroker()
-    current_pos: dict[str, float] = {}
-    equity = 100_000.0
-
-    if live:
-        if not broker.connect():
-            print("  ERROR: Could not connect to IBKR. Aborting.")
-            return
-        positions = broker.get_positions()
-        current_pos = {p.symbol: p.quantity for p in positions}
-        equity = broker.get_equity() or 100_000.0
-        print(f"  IBKR equity: ${equity:,.0f}")
-        print(f"  Current positions: {current_pos or 'none'}")
-
-    # 3. Generate orders
-    orders: list[OrderRequest] = []
-    current = set(current_pos.keys())
-
-    for sym in current - target:
-        qty = abs(int(current_pos[sym]))
-        if qty > 0:
-            orders.append(OrderRequest(sym, "SELL", qty))
-
-    if target:
-        alloc = equity / len(target)
-        prices = signal.get("prices", {})
-        for sym in target - current:
-            price = prices.get(sym, 0)
-            if price > 0:
-                qty = int(alloc / price)
-                if qty > 0:
-                    orders.append(OrderRequest(sym, "BUY", qty))
-
-    # 4. Execute or print
-    if not orders:
-        print("  No trades needed.")
-    else:
-        for o in orders:
-            print(f"  Order: {o.side} {o.quantity} {o.symbol} ({o.order_type})")
-
-    if live and orders:
-        print("\n  Submitting orders to IBKR...")
-        for o in orders:
-            result = broker.submit_order(o)
-            print(f"    {o.symbol}: {result.get('status', '?')}")
-        broker.disconnect()
-    elif not live:
-        print(f"\n  DRY RUN - orders not sent. Use 'python run.py trade --live' to execute.")
-
-    # 5. Save log
-    log_entry = {
-        "timestamp": datetime.utcnow().isoformat(),
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    trade_log = {
+        "run_id": ts,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "live": live,
-        "signal": signal,
-        "orders": [o.__dict__ for o in orders],
-        "equity": equity,
+        "steps": [],
+        "errors": [],
     }
-    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    (log_dir / f"{ts}.json").write_text(json.dumps(log_entry, indent=2, default=str))
+
+    def step(msg: str, data: dict | None = None):
+        log.info(msg)
+        entry = {"time": datetime.now(timezone.utc).isoformat(), "msg": msg}
+        if data:
+            entry["data"] = data
+        trade_log["steps"].append(entry)
+
+    def error(msg: str, data: dict | None = None):
+        log.error(msg)
+        entry = {"time": datetime.now(timezone.utc).isoformat(), "msg": msg}
+        if data:
+            entry["data"] = data
+        trade_log["errors"].append(entry)
+
+    try:
+        step("Fetching live prices from Yahoo Finance")
+        daily = fetch_live()
+        step(f"Fetched {len(daily)} price rows")
+
+        step("Computing signal")
+        signal = compute_signal(daily, config)
+        trade_log["signal"] = {k: v for k, v in signal.items() if k != "spy_history"}
+
+        step(f"Signal: action={signal.get('action')} trend={signal.get('trend')} "
+             f"SPY=${signal.get('spy_price', 0):.2f} SMA=${signal.get('spy_sma', 0):.2f} "
+             f"exposure={signal.get('exposure', 1):.1%}")
+
+        if signal["action"] not in ("hold", "go_to_cash"):
+            step(f"No action needed: {signal.get('reason', '?')}")
+            _save_trade_log(trade_log, ts)
+            return
+
+        target = set(signal.get("target_holdings", []))
+        exposure = signal.get("exposure", 1.0)
+
+        broker = IBKRBroker()
+        current_pos: dict[str, float] = {}
+        equity = 100_000.0
+        currency = "USD"
+
+        if live:
+            step("Connecting to IBKR Gateway")
+            if not broker.connect():
+                error("Could not connect to IBKR Gateway")
+                _save_trade_log(trade_log, ts)
+                return
+
+            positions = broker.get_positions()
+            current_pos = {p.symbol: p.quantity for p in positions}
+            equity = broker.get_equity() or 100_000.0
+            currency = broker.get_currency()
+            step(f"IBKR connected: equity={equity:,.2f} {currency}, positions={current_pos or 'none'}")
+            trade_log["account"] = {
+                "equity": equity,
+                "currency": currency,
+                "positions": current_pos,
+            }
+        else:
+            step("DRY RUN mode - not connecting to IBKR")
+
+        orders: list[OrderRequest] = []
+        current = set(current_pos.keys())
+
+        for sym in current - target:
+            qty = abs(int(current_pos[sym]))
+            if qty > 0:
+                orders.append(OrderRequest(sym, "SELL", qty))
+                step(f"Order: SELL {qty} {sym} (exit position)")
+
+        if target:
+            scaled_equity = equity * exposure
+            alloc_per_stock = scaled_equity / len(target)
+            prices = signal.get("prices", {})
+            step(f"Position sizing: equity={equity:,.0f} x exposure={exposure:.1%} = {scaled_equity:,.0f}, "
+                 f"per-stock={alloc_per_stock:,.0f}")
+
+            for sym in target:
+                price = prices.get(sym, 0)
+                if price <= 0:
+                    error(f"No price for {sym}, skipping")
+                    continue
+
+                desired_qty = int(alloc_per_stock / price)
+                current_qty = int(current_pos.get(sym, 0))
+                delta = desired_qty - current_qty
+
+                if delta > 0:
+                    orders.append(OrderRequest(sym, "BUY", delta))
+                    step(f"Order: BUY {delta} {sym} @ ~${price:.2f} (have {current_qty}, want {desired_qty})")
+                elif delta < 0:
+                    orders.append(OrderRequest(sym, "SELL", abs(delta)))
+                    step(f"Order: SELL {abs(delta)} {sym} (rebalance: have {current_qty}, want {desired_qty})")
+                else:
+                    step(f"No change for {sym} (already holding {current_qty})")
+
+        trade_log["orders_planned"] = [
+            {"symbol": o.symbol, "side": o.side, "quantity": o.quantity, "type": o.order_type}
+            for o in orders
+        ]
+
+        if not orders:
+            step("No trades needed - portfolio already matches target")
+        elif live:
+            step(f"Submitting {len(orders)} orders to IBKR")
+            results = []
+            for o in orders:
+                result = broker.submit_order(o)
+                results.append(result)
+                status = result.get("status", "unknown")
+                filled = result.get("filled", 0)
+                avg_px = result.get("avg_price", 0)
+                step(f"  {o.side} {o.quantity} {o.symbol}: status={status} filled={filled} avg_price={avg_px}", result)
+
+                if status in ("ApiError", "Cancelled", "Inactive"):
+                    error(f"Order failed: {o.side} {o.quantity} {o.symbol} -> {status}", result)
+
+            trade_log["order_results"] = results
+
+            step("Waiting 5s for fill updates")
+            broker._ib.sleep(5)
+
+            final_positions = broker.get_positions()
+            final_equity = broker.get_equity() or equity
+            step(f"Post-trade: equity={final_equity:,.2f} {currency}")
+            trade_log["post_trade"] = {
+                "equity": final_equity,
+                "positions": {p.symbol: {"qty": p.quantity, "cost": p.avg_cost} for p in final_positions},
+            }
+            broker.disconnect()
+            step("Disconnected from IBKR")
+        else:
+            step(f"DRY RUN - {len(orders)} orders NOT sent. Use --live to execute.")
+
+    except Exception as e:
+        error(f"Unhandled exception: {e}", {"traceback": str(e)})
+        import traceback
+        log.exception("Trade run failed")
+
+    _save_trade_log(trade_log, ts)
+
+
+def _save_trade_log(trade_log: dict, ts: str):
+    """Save detailed trade log as JSON."""
+    path = LOG_DIR / f"{ts}.json"
+    path.write_text(json.dumps(trade_log, indent=2, default=str))
+    log.info(f"Trade log saved: {path}")
 
 
 def main():

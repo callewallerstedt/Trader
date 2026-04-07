@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -51,10 +50,8 @@ def compute_signal(daily: pd.DataFrame, config: Config | None = None) -> dict:
     Compute today's target portfolio from price history.
 
     Returns a dict with:
-      action: "hold" | "go_to_cash" | "wait" | "error"
-      target_holdings: list of symbols to hold
-      momentum_scores: top 10 momentum scores
-      spy_price, spy_sma, trend, date
+      action, target_holdings, momentum_scores, spy_price, spy_sma, trend,
+      date, exposure, spy_history (last 150 days of SPY + SMA for charting)
     """
     config = config or Config()
     tradeable = [s for s in daily["symbol"].unique() if s not in NON_TRADEABLE]
@@ -78,19 +75,35 @@ def compute_signal(daily: pd.DataFrame, config: Config | None = None) -> dict:
     latest_sma = float(spy_sma.iloc[-1])
     trend_up = latest_spy > latest_sma
 
+    spy_hist = _build_spy_history(spy, spy_sma, n=150)
+
+    spy_pct_vs_sma = (latest_spy / latest_sma - 1) * 100 if latest_sma > 0 else 0
+
+    port_daily_ret = pivoted[tradeable].pct_change().mean(axis=1)
+    rvol_series = port_daily_ret.rolling(config.vol_lookback, min_periods=10).std() * math.sqrt(252)
+    rv = float(rvol_series.iloc[-1]) if not np.isnan(rvol_series.iloc[-1]) else config.vol_target
+    exposure = float(np.clip(config.vol_target / rv, config.exposure_min, config.exposure_max)) if rv > 0 else 1.0
+
     result = {
         "spy_price": latest_spy,
         "spy_sma": latest_sma,
+        "spy_pct_vs_sma": round(spy_pct_vs_sma, 2),
         "trend": "UP" if trend_up else "DOWN",
         "date": str(pivoted.index[-1].date()),
+        "exposure": round(exposure, 3),
+        "realized_vol": round(rv * 100, 1),
+        "spy_history": spy_hist,
     }
 
     if not trend_up:
+        days_below = _days_since_cross(spy, spy_sma, direction="below")
         result["action"] = "go_to_cash"
         result["target_holdings"] = []
         result["reason"] = f"SPY ${latest_spy:.2f} below SMA ${latest_sma:.2f}"
+        result["days_in_regime"] = days_below
         return result
 
+    days_above = _days_since_cross(spy, spy_sma, direction="above")
     mom = pivoted[tradeable].pct_change(config.momentum_lookback)
     latest_mom = mom.iloc[-1].dropna()
 
@@ -104,11 +117,46 @@ def compute_signal(daily: pd.DataFrame, config: Config | None = None) -> dict:
 
     result["action"] = "hold"
     result["target_holdings"] = target
+    result["days_in_regime"] = days_above
     result["momentum_scores"] = {
         sym: round(float(ranked[sym]) * 100, 2) for sym in ranked.index[:10]
     }
     result["prices"] = {sym: float(pivoted[sym].iloc[-1]) for sym in target}
     return result
+
+
+def _build_spy_history(spy: pd.Series, spy_sma: pd.Series, n: int = 150) -> list[dict]:
+    """Build last n days of SPY price + SMA for charting."""
+    tail_spy = spy.iloc[-n:]
+    tail_sma = spy_sma.iloc[-n:]
+    history = []
+    for dt, price in tail_spy.items():
+        sma_val = tail_sma.get(dt)
+        if np.isnan(price):
+            continue
+        history.append({
+            "date": str(dt.date()),
+            "price": round(float(price), 2),
+            "sma": round(float(sma_val), 2) if sma_val is not None and not np.isnan(sma_val) else None,
+        })
+    return history
+
+
+def _days_since_cross(spy: pd.Series, spy_sma: pd.Series, direction: str) -> int:
+    """Count trading days since SPY crossed above/below SMA."""
+    above = spy > spy_sma
+    if direction == "below":
+        condition = ~above
+    else:
+        condition = above
+
+    count = 0
+    for val in reversed(condition.values):
+        if val and not np.isnan(val):
+            count += 1
+        else:
+            break
+    return count
 
 
 def backtest(daily: pd.DataFrame, config: Config | None = None) -> dict:
