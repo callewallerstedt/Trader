@@ -692,19 +692,6 @@ def dashboard():
     next_run_sthlm = next_run_et.astimezone(TZ_STHLM)
     next_run_str = next_run_sthlm.strftime("%a %b %d, %H:%M")
 
-    # Paper sim: proportional cap that grows with profits
-    paper_sim = _get_paper_sim_equity()
-    if paper_sim:
-        _ps_baseline = paper_sim.get("ibkr_baseline_sek", 0)
-        _ps_sim = paper_sim.get("sim_sek", 0)
-        _ps_fx = 1.0 / ibkr.get("fx_rate_to_usd", 0.105)  # SEK per USD
-        _ibkr_now_sek = ibkr_equity_raw
-        equity_cap_sek = int(_ibkr_now_sek * (_ps_sim / _ps_baseline)) if _ps_baseline > 0 else 0
-        equity_cap_usd = equity_cap_sek / _ps_fx if _ps_fx > 0 else 0
-        ibkr_equity = equity_cap_usd  # use for trade plan sizing
-    else:
-        equity_cap_sek = int(os.environ.get("EQUITY_CAP_SEK", 0))
-        equity_cap_usd = equity_cap_sek / (1.0 / ibkr.get("fx_rate_to_usd", 0.105)) if equity_cap_sek else 0
     time_until = next_run_et - now_et
     total_secs = max(time_until.total_seconds(), 0)
     hours_until = int(total_secs // 3600)
@@ -723,6 +710,19 @@ def dashboard():
     # Convert equity to USD for position sizing (stock prices are in USD)
     ibkr_fx_rate = ibkr.get("fx_rate_to_usd", 1.0)
     ibkr_equity = ibkr_equity_raw * ibkr_fx_rate
+
+    # Paper sim: proportional cap that grows with profits
+    paper_sim = _get_paper_sim_equity()
+    if paper_sim:
+        _ps_baseline = paper_sim.get("ibkr_baseline_sek", 0)
+        _ps_sim = paper_sim.get("sim_sek", 0)
+        _ps_fx = 1.0 / ibkr_fx_rate if ibkr_fx_rate > 0 else 9.5
+        equity_cap_sek = int(ibkr_equity_raw * (_ps_sim / _ps_baseline)) if _ps_baseline > 0 else 0
+        equity_cap_usd = equity_cap_sek / _ps_fx if _ps_fx > 0 else 0
+        ibkr_equity = equity_cap_usd
+    else:
+        equity_cap_sek = int(os.environ.get("EQUITY_CAP_SEK", 0))
+        equity_cap_usd = equity_cap_sek / (1.0 / ibkr_fx_rate) if equity_cap_sek and ibkr_fx_rate > 0 else 0
 
     gw_color = "#10b981" if ibkr_connected else "#ef4444"
     gw_text = "CONNECTED" if ibkr_connected else "OFFLINE"
