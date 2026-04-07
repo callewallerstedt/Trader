@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import traceback
 from datetime import datetime, timezone
@@ -225,6 +226,15 @@ def cmd_trade(live: bool = False):
                 step(f"FX conversion: {equity:,.2f} {currency} / {fx_rate:.4f} = "
                      f"${equity_usd:,.2f} USD")
                 equity = equity_usd
+
+            # Optional equity cap for paper trading simulation (set EQUITY_CAP_SEK env var)
+            cap_sek = os.environ.get("EQUITY_CAP_SEK")
+            if cap_sek:
+                cap_usd = float(cap_sek) / fx_rate if currency.upper() != "USD" else float(cap_sek)
+                if equity > cap_usd:
+                    step(f"Equity cap applied: ${equity:,.2f} -> ${cap_usd:,.2f} USD "
+                         f"({cap_sek} {currency} cap)")
+                    equity = cap_usd
 
             trade_log["account"] = {
                 "equity": equity,
