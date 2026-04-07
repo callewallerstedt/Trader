@@ -349,6 +349,9 @@ def cmd_trade(live: bool = False):
                            "symbols": [o.symbol for o in orders]})
         else:
             step(f"DRY RUN - {len(orders)} orders NOT sent. Use --live to execute.")
+            _write_status("complete", f"Dry run done — {len(orders)} orders would be placed",
+                          {"orders": len(orders), "action": signal.get("action"),
+                           "symbols": [o.symbol for o in orders]})
 
     except Exception as e:
         error(f"Unhandled exception: {e}", {"traceback": traceback.format_exc()})
