@@ -159,6 +159,15 @@ def api_ibkr():
 def api_botlog():
     return {"log": _get_bot_log()}
 
+@app.get("/api/refresh")
+def api_refresh():
+    """Force-refresh all cached data (signal + IBKR)."""
+    _signal_cache["data"] = None
+    _signal_cache["time"] = None
+    _ibkr_cache["data"] = None
+    _ibkr_cache["time"] = None
+    return {"status": "ok", "message": "Cache cleared, next page load will fetch fresh data"}
+
 
 def _esc(s: str) -> str:
     """Escape HTML special chars."""
@@ -695,6 +704,26 @@ canvas {{ width: 100% !important; max-height: 240px; }}
 .footer a {{ color: var(--text-dim); text-decoration: none; }}
 .footer a:hover {{ color: var(--text-muted); }}
 
+.refresh-btn {{
+  background: rgba(59,130,246,0.12);
+  color: var(--blue);
+  border: 1px solid rgba(59,130,246,0.25);
+  padding: 7px 16px;
+  border-radius: 8px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}}
+.refresh-btn:hover {{ background: rgba(59,130,246,0.2); border-color: rgba(59,130,246,0.4); }}
+.refresh-btn.loading {{
+  color: var(--text-muted);
+  background: rgba(255,255,255,0.04);
+  border-color: var(--border);
+  pointer-events: none;
+}}
+
 .tabs {{ display: flex; gap: 2px; margin-bottom: 0; }}
 .tab {{
   padding: 8px 16px;
@@ -735,9 +764,12 @@ canvas {{ width: 100% !important; max-height: 240px; }}
     <h1>Multi-TF Momentum Bot</h1>
     <div class="sub">Pre-close rotation &middot; MOC execution &middot; Rebalance weekly</div>
   </div>
-  <div class="clock">
-    {now.strftime('%A, %b %d %Y')}<br>
-    <strong>{now.strftime('%H:%M')}</strong> Stockholm
+  <div style="display:flex;align-items:center;gap:14px">
+    <button id="refreshBtn" onclick="doRefresh()" class="refresh-btn">Refresh Data</button>
+    <div class="clock">
+      {now.strftime('%A, %b %d %Y')}<br>
+      <strong>{now.strftime('%H:%M')}</strong> Stockholm
+    </div>
   </div>
 </div>
 
@@ -876,6 +908,16 @@ canvas {{ width: 100% !important; max-height: 240px; }}
 </div>
 
 <script>
+function doRefresh() {{
+  const btn = document.getElementById('refreshBtn');
+  btn.textContent = 'Fetching...';
+  btn.classList.add('loading');
+  fetch('/api/refresh')
+    .then(r => r.json())
+    .then(() => {{ window.location.reload(); }})
+    .catch(() => {{ btn.textContent = 'Error'; setTimeout(() => window.location.reload(), 2000); }});
+}}
+
 function switchTab(e, id) {{
   document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
