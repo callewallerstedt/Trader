@@ -161,16 +161,25 @@ def compute_signal(daily: pd.DataFrame, config: Config | None = None) -> dict:
         "strategy": f"Multi-TF Momentum ({lb_str}d) top-{config.top_n}",
     }
 
+    all_mom = mom.iloc[-1].dropna().sort_values(ascending=False)
+    all_prices = {sym: float(pivoted[sym].iloc[-1]) for sym in tradeable if sym in pivoted.columns}
+
+    result["all_momentum"] = {
+        sym: round(float(all_mom[sym]) * 100, 2) for sym in all_mom.index
+    }
+    result["all_prices"] = all_prices
+
     if not trend_up:
         days_below = _days_since_cross(spy, spy_sma, direction="below")
         result["action"] = "go_to_cash"
         result["target_holdings"] = []
         result["reason"] = f"SPY ${latest_spy:.2f} below SMA ${latest_sma:.2f} (trend strength: {trend_strength:.0%})"
         result["days_in_regime"] = days_below
+        result["effective_exposure"] = 0.0
         return result
 
     days_above = _days_since_cross(spy, spy_sma, direction="above")
-    latest_mom = mom.iloc[-1].dropna()
+    latest_mom = all_mom.copy()
 
     if config.absolute_mom_filter:
         latest_mom = latest_mom[latest_mom > 0]

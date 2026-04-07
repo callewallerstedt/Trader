@@ -183,6 +183,8 @@ def dashboard():
     spy_pct = sig.get("spy_pct_vs_sma", 0)
     holdings = sig.get("target_holdings", [])
     mom_scores = sig.get("momentum_scores", {})
+    all_momentum = sig.get("all_momentum", mom_scores)
+    all_prices = sig.get("all_prices", {})
     sig_date = sig.get("date", "?")
     exposure = sig.get("exposure", 1.0)
     eff_exposure = sig.get("effective_exposure", exposure)
@@ -246,28 +248,107 @@ def dashboard():
     unrealized = ibkr_summary.get("UnrealizedPnL", {}).get("value", 0)
     realized = ibkr_summary.get("RealizedPnL", {}).get("value", 0)
 
+    # Portfolio positions with allocation % and profit %
+    total_pos_value = sum(abs(p.get("qty", 0) * p.get("avg_cost", 0)) for p in ibkr_positions) or 1
     pos_rows = ""
     for p in ibkr_positions:
         pnl = p.get("unrealized_pnl", 0)
         pnl_color = "#10b981" if pnl >= 0 else "#ef4444"
+        cost_basis = abs(p["qty"] * p["avg_cost"])
+        pnl_pct = (pnl / cost_basis * 100) if cost_basis > 0 else 0
+        alloc_pct = (cost_basis / ibkr_equity * 100) if ibkr_equity > 0 else 0
         pos_rows += (
             f"<tr><td><span class='sym'>{_esc(p['symbol'])}</span></td>"
             f"<td class='num'>{int(p['qty'])}</td>"
             f"<td class='num'>${p['avg_cost']:.2f}</td>"
-            f"<td class='num' style='color:{pnl_color}'>{pnl:+,.0f}</td></tr>"
+            f"<td class='num'>${cost_basis:,.0f}</td>"
+            f"<td class='num'>{alloc_pct:.1f}%</td>"
+            f"<td class='num' style='color:{pnl_color}'>{pnl:+,.0f}</td>"
+            f"<td class='num' style='color:{pnl_color}'>{pnl_pct:+.1f}%</td></tr>"
         )
 
+    # Tonight's trade plan
+    current_pos_set = {p["symbol"] for p in ibkr_positions}
+    target_set = set(holdings)
+    plan_rows = ""
+    if action == "hold" and holdings:
+        scaled_eq = ibkr_equity * eff_exposure if ibkr_equity > 0 else 100_000 * eff_exposure
+        alloc_each = scaled_eq / len(holdings) if holdings else 0
+
+        to_sell = current_pos_set - target_set
+        to_buy_new = target_set - current_pos_set
+        to_hold = target_set & current_pos_set
+
+        for sym in sorted(to_sell):
+            qty = next((int(abs(p["qty"])) for p in ibkr_positions if p["symbol"] == sym), 0)
+            plan_rows += (
+                f"<tr><td><span class='tag tag-sell'>SELL</span></td>"
+                f"<td><span class='sym'>{sym}</span></td>"
+                f"<td class='num'>{qty} shares</td>"
+                f"<td>Exit position</td></tr>"
+            )
+        for sym in sorted(to_buy_new):
+            price = all_prices.get(sym, sig.get("prices", {}).get(sym, 0))
+            qty = int(alloc_each / price) if price > 0 else 0
+            plan_rows += (
+                f"<tr><td><span class='tag tag-buy'>BUY</span></td>"
+                f"<td><span class='sym'>{sym}</span></td>"
+                f"<td class='num'>{qty} shares @ ~${price:.2f}</td>"
+                f"<td>New position (~${alloc_each:,.0f})</td></tr>"
+            )
+        for sym in sorted(to_hold):
+            price = all_prices.get(sym, sig.get("prices", {}).get(sym, 0))
+            desired = int(alloc_each / price) if price > 0 else 0
+            current = next((int(abs(p["qty"])) for p in ibkr_positions if p["symbol"] == sym), 0)
+            delta = desired - current
+            if abs(delta) > 0:
+                side = "BUY" if delta > 0 else "SELL"
+                tag_cls = "tag-buy" if delta > 0 else "tag-sell"
+                plan_rows += (
+                    f"<tr><td><span class='tag {tag_cls}'>{side}</span></td>"
+                    f"<td><span class='sym'>{sym}</span></td>"
+                    f"<td class='num'>{abs(delta)} shares</td>"
+                    f"<td>Rebalance ({current} -> {desired})</td></tr>"
+                )
+            else:
+                plan_rows += (
+                    f"<tr><td><span class='tag tag-hold'>HOLD</span></td>"
+                    f"<td><span class='sym'>{sym}</span></td>"
+                    f"<td class='num'>{current} shares</td>"
+                    f"<td>No change needed</td></tr>"
+                )
+    elif action == "go_to_cash" and current_pos_set:
+        for sym in sorted(current_pos_set):
+            qty = next((int(abs(p["qty"])) for p in ibkr_positions if p["symbol"] == sym), 0)
+            plan_rows += (
+                f"<tr><td><span class='tag tag-sell'>SELL</span></td>"
+                f"<td><span class='sym'>{sym}</span></td>"
+                f"<td class='num'>{qty} shares</td>"
+                f"<td>Go to cash (trend filter)</td></tr>"
+            )
+
+    # ALL momentum rankings
     mom_rows = ""
-    for i, (sym, score) in enumerate(mom_scores.items()):
+    max_abs_score = max(abs(s) for s in all_momentum.values()) if all_momentum else 1
+    for i, (sym, score) in enumerate(all_momentum.items()):
         is_held = sym in holdings
-        badge = '<span class="badge-hold">HOLD</span>' if is_held else ""
-        bar_w = min(max(abs(score), 1), 50)
+        is_top5 = i < 5
+        badge = ""
+        if is_held:
+            badge = '<span class="badge-hold">HOLD</span>'
+        elif is_top5 and score > 0:
+            badge = '<span class="badge-top5">TOP 5</span>'
+        bar_w = min(abs(score) / max(max_abs_score, 1) * 100, 100)
         bar_color = "#10b981" if score > 0 else "#ef4444"
         row_cls = "row-held" if is_held else ""
+        price = all_prices.get(sym, 0)
+        price_str = f"${price:.2f}" if price > 0 else "-"
+        filtered = "" if score > 0 else '<span class="badge-neg">NEG</span>'
         mom_rows += (
             f'<tr class="{row_cls}">'
             f'<td class="num" style="color:#525252">{i+1}</td>'
-            f'<td>{_esc(sym)} {badge}</td>'
+            f'<td>{_esc(sym)} {badge} {filtered}</td>'
+            f'<td class="num" style="color:var(--text-dim)">{price_str}</td>'
             f'<td><div class="mom-bar-bg"><div class="mom-bar" '
             f'style="width:{bar_w}%;background:{bar_color}"></div></div></td>'
             f'<td class="num">{score:+.1f}%</td></tr>'
@@ -557,6 +638,11 @@ tr.row-held td {{
 .tag-live {{ background: rgba(245,158,11,0.15); color: var(--amber); }}
 .tag-dry  {{ background: rgba(59,130,246,0.15); color: var(--blue); }}
 .tag-err  {{ background: rgba(239,68,68,0.15); color: var(--red); font-size:0.6rem; padding:2px 6px; border-radius:4px; margin-left:4px; font-weight:700; }}
+.tag-buy  {{ background: rgba(16,185,129,0.15); color: var(--green); }}
+.tag-sell {{ background: rgba(239,68,68,0.15); color: var(--red); }}
+.tag-hold {{ background: rgba(59,130,246,0.12); color: var(--blue); }}
+.badge-top5 {{ background: rgba(59,130,246,0.15); color: var(--blue); font-size:0.58rem; padding:2px 5px; border-radius:4px; margin-left:4px; font-weight:700; }}
+.badge-neg {{ background: rgba(239,68,68,0.1); color: #ef4444; font-size:0.55rem; padding:1px 4px; border-radius:3px; margin-left:3px; font-weight:600; }}
 
 pre {{
   background: #0c0c0e;
@@ -722,23 +808,43 @@ canvas {{ width: 100% !important; max-height: 240px; }}
   </div>
 </div>
 
-<!-- Momentum + Positions side by side -->
+<!-- Tonight's Trade Plan -->
+<div class="card full" style="margin-bottom:16px">
+  <h2>Tonight's Trade Plan &mdash; {next_run_str} Stockholm &mdash; if markets stay as-is</h2>
+  <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:12px">
+    <div style="font-size:0.8rem;color:var(--text-muted)">Target: <strong style="color:#fff">{', '.join(holdings) if holdings else 'CASH'}</strong></div>
+    <div style="font-size:0.8rem;color:var(--text-muted)">Exposure: <strong style="color:#fff">{eff_exposure:.0%}</strong></div>
+    <div style="font-size:0.8rem;color:var(--text-muted)">Account: <strong style="color:#fff">{ibkr_equity:,.0f} {ibkr_currency}</strong></div>
+    <div style="font-size:0.8rem;color:var(--text-muted)">Currently holding: <strong style="color:#fff">{', '.join(sorted(current_pos_set)) if current_pos_set else 'nothing'}</strong></div>
+  </div>
+  <table>
+    <thead><tr><th style="width:80px">Action</th><th>Symbol</th><th class="num">Details</th><th>Reason</th></tr></thead>
+    <tbody>{plan_rows if plan_rows else '<tr><td colspan="4" style="color:var(--text-dim)">No trades planned &mdash; portfolio matches target or waiting for signal</td></tr>'}</tbody>
+  </table>
+  <div style="color:var(--text-dim);font-size:0.68rem;margin-top:10px">Orders will be MOC (Market-On-Close), filling at the 4:00 PM ET closing auction. Signal recalculated at execution time with latest prices.</div>
+</div>
+
+<!-- Positions + Portfolio side by side -->
 <div class="grid-2">
 
 <div class="card">
-  <h2>Momentum Rankings (20 + 60 + 126d blend)</h2>
+  <h2>Live Portfolio (IBKR)</h2>
   <table>
-    <thead><tr><th>#</th><th>Symbol</th><th>Momentum</th><th class="num">Score</th></tr></thead>
-    <tbody>{mom_rows if mom_rows else '<tr><td colspan="4" style="color:var(--text-dim)">SPY below SMA(200) &mdash; rankings paused</td></tr>'}</tbody>
+    <thead><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Avg Cost</th><th class="num">Value</th><th class="num">Alloc</th><th class="num">P&amp;L</th><th class="num">P&amp;L %</th></tr></thead>
+    <tbody>{pos_rows if pos_rows else '<tr><td colspan="7" style="color:var(--text-dim)">No open positions &mdash; fully in cash</td></tr>'}</tbody>
   </table>
+  {'<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border)">' + '<div style="display:flex;justify-content:space-between;font-size:0.78rem"><span style="color:var(--text-muted)">Cash allocation</span><span style="color:#fff">' + f"{((ibkr_equity - gross_pos) / ibkr_equity * 100) if ibkr_equity > 0 else 100:.0f}% ({ibkr_equity - gross_pos:,.0f} {ibkr_currency})" + '</span></div>' + '<div style="display:flex;justify-content:space-between;font-size:0.78rem;margin-top:4px"><span style="color:var(--text-muted)">Invested</span><span style="color:#fff">' + f"{(gross_pos / ibkr_equity * 100) if ibkr_equity > 0 else 0:.0f}% ({gross_pos:,.0f} {ibkr_currency})" + '</span></div></div>' if ibkr_connected else ''}
 </div>
 
 <div class="card">
-  <h2>Live Positions (IBKR)</h2>
+  <h2>Full Momentum Rankings &mdash; All {len(all_momentum)} Stocks</h2>
+  <div style="max-height:420px;overflow-y:auto">
   <table>
-    <thead><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Avg Cost</th><th class="num">P&amp;L</th></tr></thead>
-    <tbody>{pos_rows if pos_rows else '<tr><td colspan="4" style="color:var(--text-dim)">No open positions</td></tr>'}</tbody>
+    <thead style="position:sticky;top:0;background:var(--card)"><tr><th>#</th><th>Symbol</th><th class="num">Price</th><th>Momentum</th><th class="num">Score</th></tr></thead>
+    <tbody>{mom_rows if mom_rows else '<tr><td colspan="5" style="color:var(--text-dim)">Loading momentum data...</td></tr>'}</tbody>
   </table>
+  </div>
+  <div style="color:var(--text-dim);font-size:0.65rem;margin-top:8px">Green = positive momentum (eligible). NEG = negative momentum (filtered out). Top 5 with positive momentum are selected.</div>
 </div>
 
 </div>
