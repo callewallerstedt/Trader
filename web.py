@@ -91,15 +91,14 @@ def _get_ibkr_status() -> dict:
 
         fx_rate = 1.0
         if currency.upper() != "USD":
-            from strategy.data import fetch_fx_rate
-            fx_rate = fetch_fx_rate(currency, "USD") or 1.0
+            fx_rate = broker.get_fx_rate("USD")
 
         return {
             "connected": True,
             "equity": equity,
             "currency": currency,
-            "fx_rate_to_usd": fx_rate,
-            "equity_usd": equity * fx_rate,
+            "fx_rate_to_usd": 1.0 / fx_rate if fx_rate > 0 else 1.0,
+            "equity_usd": equity / fx_rate if fx_rate > 0 else equity,
             "positions": [
                 {"symbol": p.symbol, "qty": p.quantity, "avg_cost": p.avg_cost,
                  "unrealized_pnl": p.unrealized_pnl}

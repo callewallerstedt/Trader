@@ -127,7 +127,7 @@ def _validate_signal_freshness(signal: dict) -> bool:
 
 
 def cmd_trade(live: bool = False):
-    from strategy.data import fetch_live, fetch_vix_live, fetch_fx_rate
+    from strategy.data import fetch_live, fetch_vix_live
     from strategy.engine import Config, compute_signal
     from broker.ibkr import IBKRBroker, OrderRequest
 
@@ -215,14 +215,14 @@ def cmd_trade(live: bool = False):
 
             # Convert equity to USD (stock prices are in USD)
             if currency.upper() != "USD":
-                fx_rate = fetch_fx_rate(currency, "USD")
-                if fx_rate is None or fx_rate <= 0:
-                    error(f"Could not fetch {currency}->USD exchange rate, aborting")
+                fx_rate = broker.get_fx_rate("USD")
+                if fx_rate <= 0:
+                    error(f"Could not get {currency}->USD exchange rate from IBKR, aborting")
                     broker.disconnect()
                     _save_trade_log(trade_log, ts)
                     return
-                equity_usd = equity * fx_rate
-                step(f"FX conversion: {equity:,.2f} {currency} x {fx_rate:.6f} = "
+                equity_usd = equity / fx_rate
+                step(f"FX conversion: {equity:,.2f} {currency} / {fx_rate:.4f} = "
                      f"${equity_usd:,.2f} USD")
                 equity = equity_usd
 

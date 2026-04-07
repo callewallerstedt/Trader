@@ -110,6 +110,21 @@ class IBKRBroker:
         for av in self._ib.accountValues():
             if av.tag == "NetLiquidation" and av.currency not in ("", "BASE"):
                 return av.currency
+
+    def get_fx_rate(self, target_ccy: str = "USD") -> float:
+        """Get exchange rate from IBKR: how many account-currency per 1 target_ccy.
+
+        E.g., if account is SEK and target is USD, returns ~9.5 (1 USD = 9.5 SEK).
+        To convert account equity to USD: equity / rate.
+        """
+        if not self._ib:
+            return 1.0
+        for av in self._ib.accountValues():
+            if av.tag == "ExchangeRate" and av.currency == target_ccy:
+                rate = float(av.value)
+                if rate > 0:
+                    return rate
+        return 1.0
         return "USD"
 
     def get_account_summary(self) -> dict:
