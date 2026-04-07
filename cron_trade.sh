@@ -14,7 +14,7 @@ if [ "$DOW" -ge 6 ]; then
     exit 0
 fi
 
-EQUITY_CAP_SEK=100000 python run.py trade --live >> trade.log 2>&1
+python run.py trade --live >> trade.log 2>&1
 EXIT_CODE=$?
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Finished (exit code: $EXIT_CODE)" >> trade.log
 echo "========================================" >> trade.log
