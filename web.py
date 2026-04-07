@@ -61,6 +61,29 @@ def _get_trade_logs() -> list[dict]:
     return logs
 
 
+def _get_bot_status() -> dict:
+    """Read the live status.json written by run.py during trade execution."""
+    f = Path("status.json")
+    if not f.exists():
+        return {"state": "idle", "phase": "No trade run yet", "updated_at": None}
+    try:
+        return json.loads(f.read_text())
+    except Exception:
+        return {"state": "idle", "phase": "Status unavailable", "updated_at": None}
+
+
+def _get_paper_sim_equity() -> dict | None:
+    """Load paper sim config and compute current simulated equity."""
+    p = Path("paper_sim.json")
+    if not p.exists():
+        return None
+    try:
+        cfg = json.loads(p.read_text())
+        return cfg
+    except Exception:
+        return None
+
+
 def _get_cron_log(lines: int = 50) -> str:
     log_file = Path("trade.log")
     if not log_file.exists():
@@ -164,6 +187,10 @@ def api_cronlog():
 @app.get("/api/ibkr")
 def api_ibkr():
     return _cached_ibkr()
+
+@app.get("/api/status")
+def api_status():
+    return _get_bot_status()
 
 @app.get("/api/botlog")
 def api_botlog():
@@ -665,8 +692,19 @@ def dashboard():
     next_run_sthlm = next_run_et.astimezone(TZ_STHLM)
     next_run_str = next_run_sthlm.strftime("%a %b %d, %H:%M")
 
-    equity_cap_sek = int(os.environ.get("EQUITY_CAP_SEK", 0))
-    equity_cap_usd = equity_cap_sek / (1.0 / ibkr.get("fx_rate_to_usd", 0.105)) if equity_cap_sek else 0
+    # Paper sim: proportional cap that grows with profits
+    paper_sim = _get_paper_sim_equity()
+    if paper_sim:
+        _ps_baseline = paper_sim.get("ibkr_baseline_sek", 0)
+        _ps_sim = paper_sim.get("sim_sek", 0)
+        _ps_fx = 1.0 / ibkr.get("fx_rate_to_usd", 0.105)  # SEK per USD
+        _ibkr_now_sek = ibkr_equity_raw
+        equity_cap_sek = int(_ibkr_now_sek * (_ps_sim / _ps_baseline)) if _ps_baseline > 0 else 0
+        equity_cap_usd = equity_cap_sek / _ps_fx if _ps_fx > 0 else 0
+        ibkr_equity = equity_cap_usd  # use for trade plan sizing
+    else:
+        equity_cap_sek = int(os.environ.get("EQUITY_CAP_SEK", 0))
+        equity_cap_usd = equity_cap_sek / (1.0 / ibkr.get("fx_rate_to_usd", 0.105)) if equity_cap_sek else 0
     time_until = next_run_et - now_et
     total_secs = max(time_until.total_seconds(), 0)
     hours_until = int(total_secs // 3600)
@@ -1007,6 +1045,10 @@ body {{
   background: {gw_color};
 }}
 
+@keyframes pulse {{
+  0%, 100% {{ opacity: 1; transform: scale(1); }}
+  50% {{ opacity: 0.4; transform: scale(1.4); }}
+}}
 .trend-meter {{
   background: #1a1a1e;
   border-radius: 6px;
@@ -1248,10 +1290,18 @@ canvas {{ width: 100% !important; max-height: 240px; }}
 </div>
 
 <div class="card" style="text-align:center">
-  <h2>Next Trade Window</h2>
+  <h2>Bot Status</h2>
+  <div id="status-pill" style="display:inline-flex;align-items:center;gap:8px;padding:6px 14px;border-radius:20px;font-size:0.82rem;font-weight:600;margin-bottom:10px;background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.3);color:#3b82f6">
+    <span id="status-dot" style="width:8px;height:8px;border-radius:50%;background:#3b82f6;display:inline-block"></span>
+    <span id="status-text">Loading...</span>
+  </div>
+  <div id="status-phase" style="color:var(--text-muted);font-size:0.78rem;margin-bottom:4px">—</div>
+  <div id="status-updated" style="color:var(--text-dim);font-size:0.68rem"></div>
+
+  <h2 style="margin-top:16px">Next Trade Window</h2>
   <div class="kpi"><div class="v" style="color:var(--blue)">{next_run_str}</div><div class="l">Stockholm time</div></div>
   <div style="color:var(--text-muted);font-size:0.85rem;margin-top:6px">in <strong>{hours_until}h {mins_until}m</strong></div>
-    <div class="kpi-row" style="margin-top:14px">
+  <div class="kpi-row" style="margin-top:14px">
     <div class="kpi"><div class="v sm">{eff_exposure:.0%}</div><div class="l">Eff. Exposure</div></div>
     <div class="kpi"><div class="v sm" style="color:{'var(--green)' if vix_multiplier >= 0.9 else 'var(--amber)' if vix_multiplier > 0 else 'var(--red)'}">{f'{vix_value:.0f}' if vix_value else '?'}</div><div class="l">VIX ({vix_multiplier:.0%})</div></div>
     <div class="kpi"><div class="v sm">{len(holdings)}</div><div class="l">Positions</div></div>
@@ -1403,6 +1453,52 @@ canvas {{ width: 100% !important; max-height: 240px; }}
 </div>
 
 <script>
+// Live bot status polling (every 15s)
+const STATUS_STYLES = {{
+  idle:        {{ bg: 'rgba(113,113,122,0.15)', border: 'rgba(113,113,122,0.3)', color: '#71717a', dot: '#71717a', label: 'IDLE' }},
+  fetching:    {{ bg: 'rgba(59,130,246,0.1)',   border: 'rgba(59,130,246,0.3)',   color: '#3b82f6', dot: '#3b82f6', label: 'FETCHING' }},
+  computing:   {{ bg: 'rgba(59,130,246,0.1)',   border: 'rgba(59,130,246,0.3)',   color: '#3b82f6', dot: '#3b82f6', label: 'COMPUTING' }},
+  connecting:  {{ bg: 'rgba(245,158,11,0.1)',   border: 'rgba(245,158,11,0.3)',   color: '#f59e0b', dot: '#f59e0b', label: 'CONNECTING' }},
+  submitting:  {{ bg: 'rgba(245,158,11,0.1)',   border: 'rgba(245,158,11,0.3)',   color: '#f59e0b', dot: '#f59e0b', label: 'SUBMITTING' }},
+  moc_pending: {{ bg: 'rgba(139,92,246,0.1)',   border: 'rgba(139,92,246,0.3)',   color: '#8b5cf6', dot: '#8b5cf6', label: 'MOC PENDING' }},
+  complete:    {{ bg: 'rgba(16,185,129,0.1)',   border: 'rgba(16,185,129,0.3)',   color: '#10b981', dot: '#10b981', label: 'COMPLETE' }},
+  error:       {{ bg: 'rgba(239,68,68,0.1)',    border: 'rgba(239,68,68,0.3)',    color: '#ef4444', dot: '#ef4444', label: 'ERROR' }},
+}};
+
+function updateBotStatus() {{
+  fetch('/api/status')
+    .then(r => r.json())
+    .then(d => {{
+      const s = STATUS_STYLES[d.state] || STATUS_STYLES.idle;
+      const pill = document.getElementById('status-pill');
+      const dot  = document.getElementById('status-dot');
+      const text = document.getElementById('status-text');
+      const phase = document.getElementById('status-phase');
+      const upd  = document.getElementById('status-updated');
+      if (!pill) return;
+      pill.style.background = s.bg;
+      pill.style.borderColor = s.border;
+      pill.style.color = s.color;
+      dot.style.background = s.dot;
+      // pulse animation during active states
+      dot.style.animation = ['fetching','computing','connecting','submitting'].includes(d.state)
+        ? 'pulse 1.2s ease-in-out infinite' : 'none';
+      text.textContent = s.label;
+      phase.textContent = d.phase || '';
+      if (d.updated_at) {{
+        const ago = Math.round((Date.now() - new Date(d.updated_at)) / 1000);
+        upd.textContent = ago < 60 ? ago + 's ago' : Math.round(ago/60) + 'm ago';
+      }}
+      if (d.symbols && d.symbols.length) {{
+        phase.textContent += ' — ' + d.symbols.join(', ');
+      }}
+    }})
+    .catch(() => {{}});
+}}
+
+updateBotStatus();
+setInterval(updateBotStatus, 15000);
+
 function doRefresh() {{
   const btn = document.getElementById('refreshBtn');
   btn.textContent = 'Fetching...';

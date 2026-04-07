@@ -157,6 +157,7 @@ def cmd_trade(live: bool = False):
         trade_log["errors"].append(entry)
 
     try:
+        _write_status("fetching", "Fetching live prices from Yahoo Finance...")
         step("Fetching live prices from Yahoo Finance")
         daily = fetch_live()
         n_syms = daily["symbol"].nunique()
@@ -169,6 +170,7 @@ def cmd_trade(live: bool = False):
         vix_val = fetch_vix_live()
         step(f"VIX: {vix_val:.1f}" if vix_val else "VIX: unavailable")
 
+        _write_status("computing", "Computing signal...")
         step("Computing signal")
         signal = compute_signal(daily, config, vix_value=vix_val)
         trade_log["signal"] = {k: v for k, v in signal.items() if k != "spy_history"}
@@ -197,9 +199,11 @@ def cmd_trade(live: bool = False):
         currency = "USD"
 
         if live:
+            _write_status("connecting", "Connecting to IBKR Gateway...")
             step("Connecting to IBKR Gateway")
             if not broker.connect():
                 error("Could not connect to IBKR Gateway after retries")
+                _write_status("error", "Could not connect to IBKR Gateway")
                 _save_trade_log(trade_log, ts)
                 return
 
@@ -227,14 +231,18 @@ def cmd_trade(live: bool = False):
                      f"${equity_usd:,.2f} USD")
                 equity = equity_usd
 
-            # Optional equity cap for paper trading simulation (set EQUITY_CAP_SEK env var)
-            cap_sek = os.environ.get("EQUITY_CAP_SEK")
-            if cap_sek:
-                cap_usd = float(cap_sek) / fx_rate if currency.upper() != "USD" else float(cap_sek)
-                if equity > cap_usd:
-                    step(f"Equity cap applied: ${equity:,.2f} -> ${cap_usd:,.2f} USD "
-                         f"({cap_sek} {currency} cap)")
-                    equity = cap_usd
+            # Paper trading simulation: proportional cap that grows with profits
+            paper_sim = _load_paper_sim()
+            if paper_sim:
+                baseline_sek = paper_sim.get("ibkr_baseline_sek", 0)
+                sim_sek = paper_sim.get("sim_sek", 0)
+                if baseline_sek > 0 and sim_sek > 0:
+                    ibkr_equity_sek = equity * fx_rate  # back to SEK
+                    sim_equity_sek = ibkr_equity_sek * (sim_sek / baseline_sek)
+                    sim_equity_usd = sim_equity_sek / fx_rate
+                    step(f"Paper sim: {sim_equity_sek:,.0f} SEK (~${sim_equity_usd:,.0f} USD) "
+                         f"[{sim_sek:,}/{baseline_sek:,.0f} SEK ratio, grows with P&L]")
+                    equity = sim_equity_usd
 
             trade_log["account"] = {
                 "equity": equity,
@@ -295,7 +303,10 @@ def cmd_trade(live: bool = False):
 
         if not orders:
             step("No trades needed - portfolio already matches target")
+            _write_status("complete", "No trades needed — portfolio matches target",
+                          {"orders": 0, "action": signal.get("action")})
         elif live:
+            _write_status("submitting", f"Submitting {len(orders)} MOC orders to IBKR...")
             step(f"Submitting {len(orders)} orders to IBKR (sells first, then buys)")
             results = broker.submit_orders_batch(orders)
 
@@ -315,6 +326,9 @@ def cmd_trade(live: bool = False):
 
             trade_log["order_results"] = results
 
+            _write_status("moc_pending", f"{len(orders)} MOC orders placed — waiting for 4 PM close",
+                          {"orders": len(orders), "action": signal.get("action"),
+                           "symbols": [o.symbol for o in orders]})
             step("Waiting 5s for fill updates")
             broker._ib.sleep(5)
 
@@ -330,12 +344,16 @@ def cmd_trade(live: bool = False):
             }
             broker.disconnect()
             step("Disconnected from IBKR")
+            _write_status("complete", f"Trade complete — {len(orders)} orders placed",
+                          {"orders": len(orders), "action": signal.get("action"),
+                           "symbols": [o.symbol for o in orders]})
         else:
             step(f"DRY RUN - {len(orders)} orders NOT sent. Use --live to execute.")
 
     except Exception as e:
         error(f"Unhandled exception: {e}", {"traceback": traceback.format_exc()})
         log.exception("Trade run failed")
+        _write_status("error", f"Unhandled exception: {e}")
 
     _save_trade_log(trade_log, ts)
 
@@ -344,6 +362,33 @@ def _save_trade_log(trade_log: dict, ts: str):
     path = LOG_DIR / f"{ts}.json"
     path.write_text(json.dumps(trade_log, indent=2, default=str))
     log.info(f"Trade log saved: {path}")
+
+
+STATUS_FILE = Path("status.json")
+
+def _write_status(state: str, phase: str, extra: dict | None = None):
+    data = {
+        "state": state,
+        "phase": phase,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if extra:
+        data.update(extra)
+    try:
+        STATUS_FILE.write_text(json.dumps(data, indent=2, default=str))
+    except Exception:
+        pass
+
+
+def _load_paper_sim() -> dict | None:
+    """Load paper simulation config (proportional equity cap)."""
+    p = Path("paper_sim.json")
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return None
 
 
 def main():
