@@ -75,7 +75,7 @@ def compute_signal(daily: pd.DataFrame, config: Config | None = None) -> dict:
     latest_sma = float(spy_sma.iloc[-1])
     trend_up = latest_spy > latest_sma
 
-    spy_hist = _build_spy_history(spy, spy_sma, n=150)
+    spy_hist = _build_spy_history(spy, spy_sma, n=200)
 
     spy_pct_vs_sma = (latest_spy / latest_sma - 1) * 100 if latest_sma > 0 else 0
 

@@ -11,6 +11,7 @@ import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
@@ -164,7 +165,8 @@ def dashboard():
     logs = _get_trade_logs()
     cron_log = _get_cron_log(30)
     bot_log = _get_bot_log(40)
-    now = datetime.now()
+    tz_sthlm = ZoneInfo("Europe/Stockholm")
+    now = datetime.now(tz_sthlm)
 
     action = sig.get("action", "unknown")
     trend = sig.get("trend", "?")
@@ -196,15 +198,18 @@ def dashboard():
         status_text = "ERROR"
         status_detail = sig.get("reason", str(sig))
 
-    today = now.replace(hour=15, minute=45, second=0, microsecond=0)
-    if now > today or now.weekday() >= 5:
-        next_run = today + timedelta(days=1)
-        while next_run.weekday() >= 5:
-            next_run += timedelta(days=1)
+    tz_et = ZoneInfo("America/New_York")
+    now_et = datetime.now(tz_et)
+    today_et = now_et.replace(hour=15, minute=45, second=0, microsecond=0)
+    if now_et > today_et or now_et.weekday() >= 5:
+        next_run_et = today_et + timedelta(days=1)
+        while next_run_et.weekday() >= 5:
+            next_run_et += timedelta(days=1)
     else:
-        next_run = today
-    next_run_str = next_run.strftime("%A %b %d, %I:%M %p ET")
-    time_until = next_run - now
+        next_run_et = today_et
+    next_run_sthlm = next_run_et.astimezone(tz_sthlm)
+    next_run_str = next_run_sthlm.strftime("%A %b %d, %H:%M CET")
+    time_until = next_run_et - now_et
     hours_until = int(time_until.total_seconds() // 3600)
     mins_until = int((time_until.total_seconds() % 3600) // 60)
 
@@ -315,7 +320,7 @@ canvas{{width:100%!important;max-height:220px}}
 </style></head><body>
 
 <h1>Momentum Rotation Bot</h1>
-<p class="subtitle">Live monitoring &middot; auto-refreshes every 2 min &middot; {now.strftime('%b %d %Y, %I:%M %p ET')}</p>
+<p class="subtitle">Live monitoring &middot; auto-refreshes every 2 min &middot; {now.strftime('%b %d %Y, %H:%M')} Stockholm</p>
 
 <!-- Row 1: Signal + Gateway + Next Run -->
 <div class="grid3">
@@ -352,7 +357,7 @@ canvas{{width:100%!important;max-height:220px}}
 
 <!-- Row 2: SPY Chart (full width) -->
 <div class="card full" style="margin-bottom:14px">
-<h2>SPY vs SMA(100) Trend Filter &mdash; last 150 days</h2>
+<h2>SPY vs SMA(100) Trend Filter</h2>
 <canvas id="spyChart" height="200"></canvas>
 </div>
 
@@ -480,10 +485,16 @@ API: <a href="/api/signal">/signal</a> <a href="/api/ibkr">/ibkr</a> <a href="/a
     for (let i = 1; i < dates.length; i++) ctx.lineTo(x(i), y(prices[i]));
     ctx.stroke();
 
-    // Legend
-    ctx.font = '11px sans-serif';
-    ctx.fillStyle = '#e5e5e5'; ctx.fillText('SPY', pad.l + 5, pad.t - 5);
-    ctx.fillStyle = '#f59e0b'; ctx.fillText('SMA(100)', pad.l + 40, pad.t - 5);
+    // Legend (top-right, no overlap)
+    const legX = W - pad.r - 140;
+    ctx.font = '12px sans-serif';
+    ctx.fillStyle = 'rgba(23,23,23,0.85)';
+    ctx.fillRect(legX - 6, 4, 144, 22);
+    ctx.lineWidth = 2; ctx.setLineDash([]);
+    ctx.strokeStyle = '#e5e5e5'; ctx.beginPath(); ctx.moveTo(legX, 16); ctx.lineTo(legX + 18, 16); ctx.stroke();
+    ctx.fillStyle = '#e5e5e5'; ctx.fillText('SPY', legX + 22, 20);
+    ctx.strokeStyle = '#f59e0b'; ctx.setLineDash([6,3]); ctx.beginPath(); ctx.moveTo(legX + 62, 16); ctx.lineTo(legX + 80, 16); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = '#f59e0b'; ctx.fillText('SMA(100)', legX + 84, 20);
 
     // Date labels
     ctx.fillStyle = '#525252'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
