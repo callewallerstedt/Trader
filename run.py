@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-Multi-TF Momentum Rotation Bot - Single entry point.
+Multi-Signal Momentum Rotation Bot V3 - Single entry point.
+
+Signal: 0.5*momentum + 0.3*residual_momentum + 0.2*acceleration
+Top-15 stocks, 25d rebalance, VIX filter (20/30), inv-vol weighted, no vol scaling.
 
 Usage:
-    python run.py download          Download 15+ years of daily data
+    python run.py download          Download 15+ years of daily data (+ VIX)
     python run.py backtest          Run backtest and show results
     python run.py signal            Show today's signal (what to buy/sell)
     python run.py trade             Dry run (compute orders, don't send)
@@ -40,53 +43,70 @@ def cmd_download():
 
 
 def cmd_backtest():
-    from strategy.data import load
+    from strategy.data import load, load_vix
     from strategy.engine import Config, backtest
 
     log.info("Loading data...")
     daily = load()
+    vix = load_vix()
     syms = sorted(daily["symbol"].unique())
     log.info(f"  {len(syms)} symbols, {daily['timestamp'].dt.date.nunique()} trading days")
+    if vix is not None:
+        log.info(f"  VIX data: {len(vix)} days")
 
     config = Config()
-    m = backtest(daily, config)
+    m = backtest(daily, config, vix_series=vix)
 
-    print(f"\n{'=' * 55}")
-    print(f"  BACKTEST RESULTS  ({m['years']} years, 25bps cost)")
-    print(f"{'=' * 55}")
+    print(f"\n{'=' * 60}")
+    print(f"  BACKTEST RESULTS  ({m['years']} years, {config.round_trip_cost_bps:.0f}bps cost)")
+    print(f"{'=' * 60}")
     print(f"  Strategy CAGR:    {m['cagr_pct']:+.1f}%")
     print(f"  SPY CAGR:         {m['spy_cagr_pct']:+.1f}%")
     print(f"  Alpha:            {m['alpha_pct']:+.1f}%")
     print(f"  Sharpe:           {m['sharpe']:.2f}")
+    print(f"  Sortino:          {m['sortino']:.2f}")
     print(f"  Max drawdown:     {m['max_drawdown_pct']:.1f}%")
+    print(f"  Profit factor:    {m['profit_factor']:.2f}")
     print(f"  Monthly win rate: {m['monthly_win_rate_pct']:.0f}%")
     print(f"  Total return:     {m['total_return_pct']:+.1f}%  (SPY: {m['spy_return_pct']:+.1f}%)")
     print(f"  Final equity:     ${m['final_equity']:,.0f}")
     print(f"  Trades:           {m['total_trades']}")
-    print(f"{'=' * 55}")
+    print(f"  Signal:           {config.sig_mom_weight:.0%} mom + "
+          f"{config.sig_resid_weight:.0%} residual + "
+          f"{config.sig_accel_weight:.0%} accel")
+    print(f"  Config:           top-{config.top_n}, rebal {config.rebalance_freq}d, "
+          f"inv-vol={'Y' if config.inv_vol_weight else 'N'}, "
+          f"VIX {config.vix_reduce_threshold}/{config.vix_flat_threshold}")
+    print(f"{'=' * 60}")
 
 
 def cmd_signal():
-    from strategy.data import fetch_live
+    from strategy.data import fetch_live, fetch_vix_live
     from strategy.engine import Config, compute_signal
 
     log.info("Fetching live prices...")
     daily = fetch_live()
-    signal = compute_signal(daily, Config())
+    vix_val = fetch_vix_live()
+    signal = compute_signal(daily, Config(), vix_value=vix_val)
 
-    print(f"\nDate:      {signal.get('date', '?')}")
-    print(f"SPY:       ${signal.get('spy_price', 0):.2f}")
-    print(f"SMA(200):  ${signal.get('spy_sma', 0):.2f}")
-    print(f"SPY vs SMA:{signal.get('spy_pct_vs_sma', 0):+.2f}%")
-    print(f"Trend:     {signal.get('trend', '?')} (strength: {signal.get('trend_strength', 0):.0f}%)")
-    print(f"Exposure:  {signal.get('exposure', 1):.1%}")
-    print(f"Vol (ann): {signal.get('realized_vol', 0):.1f}%")
-    print(f"Action:    {signal.get('action', '?')}")
-    print(f"Strategy:  {signal.get('strategy', '?')}")
+    print(f"\nDate:       {signal.get('date', '?')}")
+    print(f"SPY:        ${signal.get('spy_price', 0):.2f}")
+    print(f"SMA(200):   ${signal.get('spy_sma', 0):.2f}")
+    print(f"SPY vs SMA: {signal.get('spy_pct_vs_sma', 0):+.2f}%")
+    print(f"Trend:      {signal.get('trend', '?')} (strength: {signal.get('trend_strength', 0):.0f}%)")
+    print(f"Exposure:   {signal.get('effective_exposure', signal.get('exposure', 1)):.1%}")
+    if vix_val is not None:
+        print(f"VIX:        {vix_val:.1f} (multiplier: {signal.get('vix_multiplier', 1):.1%})")
+    print(f"Action:     {signal.get('action', '?')}")
+    print(f"Strategy:   {signal.get('strategy', '?')}")
     if signal.get("target_holdings"):
-        print(f"Hold:      {', '.join(signal['target_holdings'])}")
+        print(f"Hold:       {', '.join(signal['target_holdings'])}")
+    if signal.get("target_weights"):
+        print(f"\nTarget weights:")
+        for sym, w in sorted(signal["target_weights"].items(), key=lambda x: -x[1]):
+            print(f"  {sym:6s} {w:.1%}")
     if signal.get("momentum_scores"):
-        print(f"\nTop 10 by momentum:")
+        print(f"\nTop 15 by momentum:")
         for sym, score in signal["momentum_scores"].items():
             print(f"  {sym:6s} {score:+.1f}%")
 
@@ -107,7 +127,7 @@ def _validate_signal_freshness(signal: dict) -> bool:
 
 
 def cmd_trade(live: bool = False):
-    from strategy.data import fetch_live
+    from strategy.data import fetch_live, fetch_vix_live
     from strategy.engine import Config, compute_signal
     from broker.ibkr import IBKRBroker, OrderRequest
 
@@ -142,11 +162,14 @@ def cmd_trade(live: bool = False):
         n_rows = len(daily)
         step(f"Fetched {n_rows} rows for {n_syms} symbols")
 
-        if n_syms < 10:
+        if n_syms < 15:
             error(f"Only {n_syms} symbols fetched - data quality issue")
 
+        vix_val = fetch_vix_live()
+        step(f"VIX: {vix_val:.1f}" if vix_val else "VIX: unavailable")
+
         step("Computing signal")
-        signal = compute_signal(daily, config)
+        signal = compute_signal(daily, config, vix_value=vix_val)
         trade_log["signal"] = {k: v for k, v in signal.items() if k != "spy_history"}
 
         if not _validate_signal_freshness(signal):
@@ -155,7 +178,8 @@ def cmd_trade(live: bool = False):
         step(f"Signal: action={signal.get('action')} trend={signal.get('trend')} "
              f"strength={signal.get('trend_strength', 0):.0f}% "
              f"SPY=${signal.get('spy_price', 0):.2f} SMA=${signal.get('spy_sma', 0):.2f} "
-             f"exposure={signal.get('exposure', 1):.1%}")
+             f"exposure={signal.get('exposure', 1):.1%} "
+             f"VIX mult={signal.get('vix_multiplier', 1):.0%}")
 
         if signal["action"] not in ("hold", "go_to_cash"):
             step(f"No action needed: {signal.get('reason', '?')}")
@@ -163,6 +187,7 @@ def cmd_trade(live: bool = False):
             return
 
         target = set(signal.get("target_holdings", []))
+        target_weights = signal.get("target_weights", {})
         exposure = signal.get("effective_exposure", signal.get("exposure", 1.0))
 
         broker = IBKRBroker()
@@ -198,18 +223,19 @@ def cmd_trade(live: bool = False):
         orders: list[OrderRequest] = []
         current = set(current_pos.keys())
 
+        # Sell positions no longer in target
         for sym in current - target:
             qty = abs(int(current_pos[sym]))
             if qty > 0:
                 orders.append(OrderRequest(sym, "SELL", qty))
                 step(f"Order: SELL {qty} {sym} (exit position)")
 
+        # Size target positions using inverse-vol weights
         if target:
             scaled_equity = equity * exposure
-            alloc_per_stock = scaled_equity / len(target)
             prices = signal.get("prices", {})
             step(f"Position sizing: equity={equity:,.0f} x exposure={exposure:.1%} "
-                 f"= {scaled_equity:,.0f}, per-stock={alloc_per_stock:,.0f}")
+                 f"= {scaled_equity:,.0f} across {len(target)} stocks")
 
             for sym in target:
                 price = prices.get(sym, 0)
@@ -217,9 +243,11 @@ def cmd_trade(live: bool = False):
                     error(f"No price for {sym}, skipping")
                     continue
 
-                desired_qty = int(alloc_per_stock / price)
+                weight = target_weights.get(sym, 1.0 / len(target))
+                alloc = scaled_equity * weight
+                desired_qty = int(alloc / price)
                 if desired_qty <= 0:
-                    error(f"Computed 0 shares for {sym} (alloc={alloc_per_stock:.0f}, price={price:.2f})")
+                    error(f"Computed 0 shares for {sym} (alloc={alloc:.0f}, price={price:.2f}, weight={weight:.1%})")
                     continue
 
                 current_qty = int(current_pos.get(sym, 0))
@@ -228,11 +256,11 @@ def cmd_trade(live: bool = False):
                 if delta > 0:
                     orders.append(OrderRequest(sym, "BUY", delta))
                     step(f"Order: BUY {delta} {sym} @ ~${price:.2f} "
-                         f"(have {current_qty}, want {desired_qty})")
+                         f"(have {current_qty}, want {desired_qty}, weight={weight:.1%})")
                 elif delta < 0:
                     orders.append(OrderRequest(sym, "SELL", abs(delta)))
                     step(f"Order: SELL {abs(delta)} {sym} "
-                         f"(rebalance: have {current_qty}, want {desired_qty})")
+                         f"(rebalance: have {current_qty}, want {desired_qty}, weight={weight:.1%})")
                 else:
                     step(f"No change for {sym} (already holding {current_qty})")
 

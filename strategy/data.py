@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 import yfinance as yf
 
-from strategy.engine import UNIVERSE
+from strategy.engine import UNIVERSE, VIX_SYMBOL
 
 log = logging.getLogger(__name__)
 
@@ -43,14 +43,15 @@ def _download_symbol(sym: str, start: str, end: str) -> pd.DataFrame | None:
 
 
 def download(data_dir: str | Path = "data") -> Path:
-    """Download daily bars for all universe symbols. Returns data directory."""
+    """Download daily bars for all universe symbols + VIX. Returns data directory."""
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
 
+    all_syms = list(UNIVERSE) + [VIX_SYMBOL]
     success = 0
-    for sym in UNIVERSE:
+    for sym in all_syms:
         print(f"  {sym}...", end=" ", flush=True)
-        df = _download_symbol(sym, "2010-01-01", "2026-12-31")
+        df = _download_symbol(sym, "2009-01-01", "2026-12-31")
         if df is None:
             print("SKIP")
             continue
@@ -60,24 +61,59 @@ def download(data_dir: str | Path = "data") -> Path:
         print(f"{len(df)} days ({df['timestamp'].min().date()} to {df['timestamp'].max().date()})")
         success += 1
 
-    log.info(f"Download complete: {success}/{len(UNIVERSE)} symbols")
+    log.info(f"Download complete: {success}/{len(all_syms)} symbols")
     return data_dir
 
 
 def load(data_dir: str | Path = "data") -> pd.DataFrame:
-    """Load all downloaded parquet files into a single DataFrame."""
+    """Load downloaded parquet files for UNIVERSE symbols only (excludes VIX)."""
     data_dir = Path(data_dir)
     frames = []
-    for f in sorted(data_dir.glob("*.parquet")):
+    for sym in UNIVERSE:
+        f = data_dir / f"{sym}.parquet"
+        if not f.exists():
+            continue
         df = pd.read_parquet(f)
         if "symbol" not in df.columns:
-            df["symbol"] = f.stem
+            df["symbol"] = sym
         frames.append(df)
     if not frames:
         raise FileNotFoundError(f"No parquet files in {data_dir}. Run: python run.py download")
     all_df = pd.concat(frames, ignore_index=True)
     all_df["timestamp"] = pd.to_datetime(all_df["timestamp"])
     return all_df.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
+
+
+def load_vix(data_dir: str | Path = "data") -> pd.Series | None:
+    """Load VIX close prices as a Series indexed by timestamp."""
+    data_dir = Path(data_dir)
+    f = data_dir / f"{VIX_SYMBOL}.parquet"
+    if not f.exists():
+        log.warning("VIX data not found, crash filter will be disabled")
+        return None
+    df = pd.read_parquet(f)
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    return df.set_index("timestamp")["close"].sort_index()
+
+
+def fetch_vix_live(lookback_days: int = 30) -> float | None:
+    """Fetch the latest VIX close from Yahoo Finance."""
+    from datetime import datetime, timedelta
+    end = datetime.now()
+    start = end - timedelta(days=lookback_days)
+    try:
+        df = yf.download(VIX_SYMBOL, start=start.strftime("%Y-%m-%d"),
+                         end=end.strftime("%Y-%m-%d"),
+                         interval="1d", progress=False, auto_adjust=True)
+        if df.empty:
+            return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+        df.columns = [c.lower() for c in df.columns]
+        return float(df["close"].iloc[-1])
+    except Exception as e:
+        log.warning(f"Failed to fetch VIX: {e}")
+        return None
 
 
 def fetch_live(symbols: list[str] | None = None, lookback_days: int = 600) -> pd.DataFrame:

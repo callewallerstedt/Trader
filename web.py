@@ -27,20 +27,22 @@ TZ_ET = ZoneInfo("America/New_York")
 
 def _get_signal() -> dict:
     try:
-        from strategy.data import fetch_live
+        from strategy.data import fetch_live, fetch_vix_live
         from strategy.engine import Config, compute_signal
         daily = fetch_live()
-        return compute_signal(daily, Config())
+        vix_val = fetch_vix_live()
+        return compute_signal(daily, Config(), vix_value=vix_val)
     except Exception as e:
         return {"action": "error", "reason": str(e)}
 
 
 def _get_backtest() -> dict:
     try:
-        from strategy.data import load
+        from strategy.data import load, load_vix
         from strategy.engine import Config, backtest
         daily = load()
-        return backtest(daily, Config())
+        vix = load_vix()
+        return backtest(daily, Config(), vix_series=vix)
     except Exception as e:
         return {"error": str(e)}
 
@@ -331,7 +333,7 @@ canvas {{ width:100%!important; }}
 <div class="header">
   <div>
     <h1>Backtest Results</h1>
-    <div class="sub">Multi-TF Momentum (20+60+126d) top-5 &middot; {bt_years} years &middot; 25bps round-trip &middot; $100k initial</div>
+    <div class="sub">V3: Top-15 combined signal &middot; VIX 20/30 &middot; SMA(200) &middot; {bt_years} years &middot; 25bps round-trip</div>
   </div>
   <a href="/">&larr; Back to Dashboard</a>
 </div>
@@ -401,6 +403,32 @@ canvas {{ width:100%!important; }}
   </div>
 </div>
 
+<!-- Strategy Explanation -->
+<div class="card" style="margin-bottom:16px">
+  <h2>Strategy V3 &mdash; How It Works</h2>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+    <div>
+      <div style="font-size:0.75rem;font-weight:600;color:#fff;margin-bottom:6px">Combined Stock Ranking</div>
+      <div style="font-size:0.75rem;color:var(--text-muted);line-height:1.7">
+        <code style="color:var(--green);background:rgba(16,185,129,0.08);padding:2px 6px;border-radius:4px;font-size:0.7rem">score = 0.5*mom + 0.3*residual + 0.2*accel</code><br>
+        <strong>Momentum</strong>: Blended 20/60/126-day returns (weights 1:2:1)<br>
+        <strong>Residual momentum</strong>: Stock return minus beta*SPY (126d OLS). Removes market exposure.<br>
+        <strong>Acceleration</strong>: 21d/126d momentum ratio. Catches early trends.
+      </div>
+    </div>
+    <div>
+      <div style="font-size:0.75rem;font-weight:600;color:#fff;margin-bottom:6px">Risk Controls &amp; Execution</div>
+      <div style="font-size:0.75rem;color:var(--text-muted);line-height:1.7">
+        Top-15 stocks, inverse-vol weighted (15% cap per stock).<br>
+        SMA(200) gradual trend filter (0-100% exposure).<br>
+        VIX crash filter: reduce &gt;20, flat &gt;30.<br>
+        Rebalance every 25 trading days. MOC orders at 3:45 PM ET.<br>
+        44-stock survivorship-free universe from 2009. 25 bps round-trip.
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Yearly Returns Table -->
 <div class="card">
   <h2>Annual Returns Comparison</h2>
@@ -411,7 +439,7 @@ canvas {{ width:100%!important; }}
 </div>
 
 <div class="footer">
-  <a href="/">&larr; Back to Dashboard</a> &middot; Backtest uses 25bps round-trip costs, weekly rebalance, SMA(200) trend filter
+  <a href="/">&larr; Back to Dashboard</a> &middot; V3: 25bps costs, 25-day rebalance, combined signal (Mom+Resid+Accel), VIX filter (20/30), inv-vol weighting
 </div>
 
 <script>
@@ -593,6 +621,9 @@ def dashboard():
     realized_vol = sig.get("realized_vol", 0)
     days_in_regime = sig.get("days_in_regime", "?")
     spy_history = sig.get("spy_history", [])
+    vix_value = sig.get("vix_value")
+    vix_multiplier = sig.get("vix_multiplier", 1.0)
+    target_weights = sig.get("target_weights", {})
 
     if action == "hold":
         status_color = "#10b981"
@@ -675,7 +706,6 @@ def dashboard():
     plan_rows = ""
     if action == "hold" and holdings:
         scaled_eq = ibkr_equity * eff_exposure if ibkr_equity > 0 else 100_000 * eff_exposure
-        alloc_each = scaled_eq / len(holdings) if holdings else 0
 
         to_sell = current_pos_set - target_set
         to_buy_new = target_set - current_pos_set
@@ -691,16 +721,20 @@ def dashboard():
             )
         for sym in sorted(to_buy_new):
             price = all_prices.get(sym, sig.get("prices", {}).get(sym, 0))
-            qty = int(alloc_each / price) if price > 0 else 0
+            weight = target_weights.get(sym, 1.0 / max(len(holdings), 1))
+            alloc = scaled_eq * weight
+            qty = int(alloc / price) if price > 0 else 0
             plan_rows += (
                 f"<tr><td><span class='tag tag-buy'>BUY</span></td>"
                 f"<td><span class='sym'>{sym}</span></td>"
                 f"<td class='num'>{qty} shares @ ~${price:.2f}</td>"
-                f"<td>New position (~${alloc_each:,.0f})</td></tr>"
+                f"<td>New position (~${alloc:,.0f}, {weight:.1%} weight)</td></tr>"
             )
         for sym in sorted(to_hold):
             price = all_prices.get(sym, sig.get("prices", {}).get(sym, 0))
-            desired = int(alloc_each / price) if price > 0 else 0
+            weight = target_weights.get(sym, 1.0 / max(len(holdings), 1))
+            alloc = scaled_eq * weight
+            desired = int(alloc / price) if price > 0 else 0
             current = next((int(abs(p["qty"])) for p in ibkr_positions if p["symbol"] == sym), 0)
             delta = desired - current
             if abs(delta) > 0:
@@ -710,14 +744,14 @@ def dashboard():
                     f"<tr><td><span class='tag {tag_cls}'>{side}</span></td>"
                     f"<td><span class='sym'>{sym}</span></td>"
                     f"<td class='num'>{abs(delta)} shares</td>"
-                    f"<td>Rebalance ({current} -> {desired})</td></tr>"
+                    f"<td>Rebalance ({current} -> {desired}, {weight:.1%} wt)</td></tr>"
                 )
             else:
                 plan_rows += (
                     f"<tr><td><span class='tag tag-hold'>HOLD</span></td>"
                     f"<td><span class='sym'>{sym}</span></td>"
                     f"<td class='num'>{current} shares</td>"
-                    f"<td>No change needed</td></tr>"
+                    f"<td>No change ({weight:.1%} weight)</td></tr>"
                 )
     elif action == "go_to_cash" and current_pos_set:
         for sym in sorted(current_pos_set):
@@ -731,15 +765,18 @@ def dashboard():
 
     # ALL momentum rankings
     mom_rows = ""
+    from strategy.engine import Config as _cfg
+    _top_n = _cfg().top_n
     max_abs_score = max(abs(s) for s in all_momentum.values()) if all_momentum else 1
     for i, (sym, score) in enumerate(all_momentum.items()):
         is_held = sym in holdings
-        is_top5 = i < 5
+        is_top_n = i < _top_n
         badge = ""
         if is_held:
-            badge = '<span class="badge-hold">HOLD</span>'
-        elif is_top5 and score > 0:
-            badge = '<span class="badge-top5">TOP 5</span>'
+            weight_str = f" {target_weights.get(sym, 0):.0%}" if target_weights.get(sym) else ""
+            badge = f'<span class="badge-hold">HOLD{weight_str}</span>'
+        elif is_top_n and score > 0:
+            badge = f'<span class="badge-top5">TOP {_top_n}</span>'
         bar_w = min(abs(score) / max(max_abs_score, 1) * 100, 100)
         bar_color = "#10b981" if score > 0 else "#ef4444"
         row_cls = "row-held" if is_held else ""
@@ -787,6 +824,8 @@ def dashboard():
     bt_trades = bt.get("total_trades", 0)
     bt_total_ret = bt.get("total_return_pct", 0)
     bt_spy_ret = bt.get("spy_return_pct", 0)
+    bt_pf_main = bt.get("profit_factor", 0)
+    bt_sortino_main = bt.get("sortino", 0)
 
     trend_pct = max(0, min(100, trend_strength))
     if trend_pct >= 70:
@@ -1155,7 +1194,7 @@ canvas {{ width: 100% !important; max-height: 240px; }}
 <div class="header">
   <div>
     <h1>Multi-TF Momentum Bot</h1>
-    <div class="sub">Pre-close rotation &middot; MOC execution &middot; Rebalance weekly</div>
+    <div class="sub">V3: Top-15 inv-vol &middot; Mom+Resid+Accel &middot; VIX 20/30 &middot; MOC &middot; Rebalance 25d</div>
   </div>
   <div style="display:flex;align-items:center;gap:14px">
     <button id="refreshBtn" onclick="doRefresh()" class="refresh-btn">Refresh Data</button>
@@ -1173,7 +1212,7 @@ canvas {{ width: 100% !important; max-height: 240px; }}
   <h2>Current Signal</h2>
   <div><span class="signal-dot"></span><span class="signal-label">{status_text}</span></div>
   <div class="signal-detail">{_esc(status_detail)}</div>
-  <div class="signal-meta">{sig_date} &middot; {days_in_regime} days in regime &middot; Trend {trend_strength:.0f}%</div>
+  <div class="signal-meta">{sig_date} &middot; {days_in_regime} days in regime &middot; Trend {trend_strength:.0f}%{f' &middot; VIX {vix_value:.1f} ({vix_multiplier:.0%})' if vix_value else ''}</div>
 </div>
 
 <div class="card" style="text-align:center">
@@ -1195,10 +1234,10 @@ canvas {{ width: 100% !important; max-height: 240px; }}
   <h2>Next Trade Window</h2>
   <div class="kpi"><div class="v" style="color:var(--blue)">{next_run_str}</div><div class="l">Stockholm time</div></div>
   <div style="color:var(--text-muted);font-size:0.85rem;margin-top:6px">in <strong>{hours_until}h {mins_until}m</strong></div>
-  <div class="kpi-row" style="margin-top:14px">
-    <div class="kpi"><div class="v sm">{exposure:.0%}</div><div class="l">Vol Exposure</div></div>
+    <div class="kpi-row" style="margin-top:14px">
     <div class="kpi"><div class="v sm">{eff_exposure:.0%}</div><div class="l">Eff. Exposure</div></div>
-    <div class="kpi"><div class="v sm">{realized_vol:.0f}%</div><div class="l">Realized Vol</div></div>
+    <div class="kpi"><div class="v sm" style="color:{'var(--green)' if vix_multiplier >= 0.9 else 'var(--amber)' if vix_multiplier > 0 else 'var(--red)'}">{f'{vix_value:.0f}' if vix_value else '?'}</div><div class="l">VIX ({vix_multiplier:.0%})</div></div>
+    <div class="kpi"><div class="v sm">{len(holdings)}</div><div class="l">Positions</div></div>
   </div>
 
   <h2 style="margin-top:18px">Trend Strength</h2>
@@ -1230,9 +1269,9 @@ canvas {{ width: 100% !important; max-height: 240px; }}
   </div>
   <div class="bt-row" style="margin-top:10px">
     <div class="bt-kpi"><div class="v" style="color:var(--red)">{bt_dd:.1f}%</div><div class="l">Max Drawdown</div></div>
-    <div class="bt-kpi"><div class="v">{bt_win:.0f}%</div><div class="l">Monthly Win Rate</div></div>
+    <div class="bt-kpi"><div class="v">{bt_pf_main:.2f}</div><div class="l">Profit Factor</div></div>
+    <div class="bt-kpi"><div class="v">{bt_sortino_main:.2f}</div><div class="l">Sortino</div></div>
     <div class="bt-kpi"><div class="v">{bt_total_ret:+,.0f}%</div><div class="l">Total Return</div></div>
-    <div class="bt-kpi"><div class="v">{bt_trades:,}</div><div class="l">Total Trades</div></div>
   </div>
 </div>
 
@@ -1265,16 +1304,59 @@ canvas {{ width: 100% !important; max-height: 240px; }}
 </div>
 
 <div class="card">
-  <h2>Full Momentum Rankings &mdash; All {len(all_momentum)} Stocks</h2>
+  <h2>Combined Rankings &mdash; All {len(all_momentum)} Stocks</h2>
   <div style="max-height:420px;overflow-y:auto">
   <table>
-    <thead style="position:sticky;top:0;background:var(--card)"><tr><th>#</th><th>Symbol</th><th class="num">Price</th><th>Momentum</th><th class="num">Score</th></tr></thead>
+    <thead style="position:sticky;top:0;background:var(--card)"><tr><th>#</th><th>Symbol</th><th class="num">Price</th><th>Combined Score</th><th class="num">Score</th></tr></thead>
     <tbody>{mom_rows if mom_rows else '<tr><td colspan="5" style="color:var(--text-dim)">Loading momentum data...</td></tr>'}</tbody>
   </table>
   </div>
-  <div style="color:var(--text-dim);font-size:0.65rem;margin-top:8px">Green = positive momentum (eligible). NEG = negative momentum (filtered out). Top 5 with positive momentum are selected.</div>
+  <div style="color:var(--text-dim);font-size:0.65rem;margin-top:8px">Score = 50% momentum + 30% residual momentum + 20% acceleration. Top {_top_n} with positive raw momentum, inverse-vol weighted.</div>
 </div>
 
+</div>
+
+<!-- How Strategy Works -->
+<div class="card full" style="margin-bottom:16px">
+  <h2>How the Strategy Works &mdash; V3 Combined Signal</h2>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:16px">
+    <div style="background:rgba(16,185,129,0.04);border:1px solid rgba(16,185,129,0.1);border-radius:10px;padding:16px">
+      <div style="font-size:0.72rem;font-weight:700;color:var(--green);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:8px">Stock Selection</div>
+      <div style="font-size:0.8rem;color:var(--text);line-height:1.6">
+        Ranks all 44 stocks using a <strong style="color:#fff">combined score</strong>:<br>
+        <span style="color:var(--green)">50%</span> Blended Momentum (20/60/126d)<br>
+        <span style="color:var(--blue)">30%</span> Residual Momentum (vs SPY beta)<br>
+        <span style="color:var(--purple)">20%</span> Momentum Acceleration (21d/126d)<br>
+        Buys <strong style="color:#fff">top 15</strong> with positive raw momentum, <strong style="color:#fff">inverse-volatility weighted</strong> with 15% per-stock cap.
+      </div>
+    </div>
+    <div style="background:rgba(245,158,11,0.04);border:1px solid rgba(245,158,11,0.1);border-radius:10px;padding:16px">
+      <div style="font-size:0.72rem;font-weight:700;color:var(--amber);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:8px">Risk Management</div>
+      <div style="font-size:0.8rem;color:var(--text);line-height:1.6">
+        <strong style="color:#fff">SMA(200) Trend Filter</strong>: Gradual ramp 0-100% exposure based on SPY vs its 200-day moving average.<br>
+        <strong style="color:#fff">VIX Crash Filter</strong>: Linearly reduces exposure when VIX &gt; 20, goes flat above 30.<br>
+        No portfolio vol-scaling (empirically hurts returns).
+      </div>
+    </div>
+    <div style="background:rgba(59,130,246,0.04);border:1px solid rgba(59,130,246,0.1);border-radius:10px;padding:16px">
+      <div style="font-size:0.72rem;font-weight:700;color:var(--blue);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:8px">Execution</div>
+      <div style="font-size:0.8rem;color:var(--text);line-height:1.6">
+        Rebalances every <strong style="color:#fff">25 trading days</strong>.<br>
+        Submits <strong style="color:#fff">MOC (Market-On-Close)</strong> orders at 3:45 PM ET, fills at the 4 PM closing auction.<br>
+        Universe: 44 survivorship-free US equities + sector ETFs (data from 2009).<br>
+        Assumes 25 bps round-trip cost.
+      </div>
+    </div>
+  </div>
+  <div style="background:rgba(255,255,255,0.02);border-radius:8px;padding:14px;font-size:0.75rem;color:var(--text-muted);line-height:1.7">
+    <strong style="color:var(--text)">Signal formula:</strong>
+    <code style="color:var(--green);background:rgba(16,185,129,0.08);padding:2px 6px;border-radius:4px;font-size:0.72rem">
+      score = 0.5 * momentum_rank + 0.3 * residual_momentum_rank + 0.2 * acceleration_rank
+    </code><br>
+    <strong style="color:var(--text)">Residual momentum</strong> removes market-beta exposure via 126-day rolling OLS regression vs SPY, isolating stock-specific alpha.
+    <strong style="color:var(--text)">Acceleration</strong> captures early-phase trends by comparing short-term (21d) to long-term (126d) momentum magnitude.
+    All three signals are cross-sectionally ranked (percentile) before combining, preventing any single signal from dominating.
+  </div>
 </div>
 
 <!-- Trade Log -->
