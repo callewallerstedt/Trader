@@ -302,14 +302,19 @@ def backtest(daily: pd.DataFrame, config: Config | None = None) -> dict:
 
     eq = equity_curve[warmup:]
     spy_n = spy_norm[warmup:]
+    eq_dates = dates[warmup:]
     valid = ~np.isnan(eq) & ~np.isnan(spy_n)
-    eq, spy_n = eq[valid], spy_n[valid]
+    eq = eq[valid]
+    spy_n = spy_n[valid]
+    eq_dates = [d for d, v in zip(eq_dates, valid) if v]
 
     if len(eq) < 2:
         return {"error": "not enough data"}
 
     d_ret = np.diff(eq) / eq[:-1]
     d_ret = d_ret[np.isfinite(d_ret)]
+    spy_d_ret = np.diff(spy_n) / spy_n[:-1]
+    spy_d_ret = spy_d_ret[np.isfinite(spy_d_ret)]
     days = len(d_ret)
     years = days / 252
     std = np.std(d_ret)
@@ -318,25 +323,100 @@ def backtest(daily: pd.DataFrame, config: Config | None = None) -> dict:
     spy_cagr = (spy_n[-1] / spy_n[0]) ** (1 / max(years, 0.1)) - 1
     sharpe = float(np.mean(d_ret) / std * math.sqrt(252)) if std > 1e-12 else 0
     peak = np.maximum.accumulate(eq)
-    max_dd = float(np.min(eq / peak - 1))
+    dd_series = eq / peak - 1
+    max_dd = float(np.min(dd_series))
 
-    monthly_eq = eq[::21]
-    if len(monthly_eq) > 1:
-        monthly_ret = np.diff(monthly_eq) / monthly_eq[:-1]
-        monthly_win_rate = float(np.mean(monthly_ret > 0))
-    else:
-        monthly_win_rate = 0
+    neg_ret = d_ret[d_ret < 0]
+    downside_std = float(np.std(neg_ret)) if len(neg_ret) > 0 else 1e-9
+    sortino = float(np.mean(d_ret) / downside_std * math.sqrt(252)) if downside_std > 1e-12 else 0
+    calmar = float(cagr / abs(max_dd)) if abs(max_dd) > 1e-9 else 0
+    daily_win_rate = float(np.mean(d_ret > 0)) if len(d_ret) > 0 else 0
+    profit_factor = float(np.sum(d_ret[d_ret > 0]) / abs(np.sum(d_ret[d_ret < 0]))) if np.sum(d_ret[d_ret < 0]) != 0 else 0
+    avg_daily_ret = float(np.mean(d_ret))
+    best_day = float(np.max(d_ret)) if len(d_ret) > 0 else 0
+    worst_day = float(np.min(d_ret)) if len(d_ret) > 0 else 0
+    ann_vol = float(std * math.sqrt(252))
+
+    # Monthly returns by year/month for heatmap
+    monthly_data: dict[int, dict[int, float]] = {}
+    spy_monthly_data: dict[int, dict[int, float]] = {}
+    prev_month_eq = eq[0]
+    prev_month_spy = spy_n[0]
+    prev_ym = (eq_dates[0].year, eq_dates[0].month) if eq_dates else (0, 0)
+
+    for i in range(1, len(eq)):
+        cur_ym = (eq_dates[i].year, eq_dates[i].month)
+        if cur_ym != prev_ym or i == len(eq) - 1:
+            yr, mo = prev_ym
+            ret = (eq[i - 1] / prev_month_eq - 1) * 100 if prev_month_eq > 0 else 0
+            spy_ret = (spy_n[i - 1] / prev_month_spy - 1) * 100 if prev_month_spy > 0 else 0
+            monthly_data.setdefault(yr, {})[mo] = round(ret, 2)
+            spy_monthly_data.setdefault(yr, {})[mo] = round(spy_ret, 2)
+            prev_month_eq = eq[i - 1]
+            prev_month_spy = spy_n[i - 1]
+            prev_ym = cur_ym
+
+    # Yearly returns
+    yearly_data: list[dict] = []
+    prev_year_eq = eq[0]
+    prev_year_spy = spy_n[0]
+    prev_yr = eq_dates[0].year if eq_dates else 0
+    for i in range(1, len(eq)):
+        cur_yr = eq_dates[i].year
+        if cur_yr != prev_yr or i == len(eq) - 1:
+            yr_ret = (eq[i - 1] / prev_year_eq - 1) * 100
+            spy_yr_ret = (spy_n[i - 1] / prev_year_spy - 1) * 100
+            yearly_data.append({
+                "year": prev_yr,
+                "return_pct": round(yr_ret, 1),
+                "spy_pct": round(spy_yr_ret, 1),
+                "alpha_pct": round(yr_ret - spy_yr_ret, 1),
+            })
+            prev_year_eq = eq[i - 1]
+            prev_year_spy = spy_n[i - 1]
+            prev_yr = cur_yr
+
+    # Monthly returns flat for win rate
+    all_monthly_rets = []
+    for yr_months in monthly_data.values():
+        all_monthly_rets.extend(yr_months.values())
+    monthly_win_rate = sum(1 for r in all_monthly_rets if r > 0) / len(all_monthly_rets) if all_monthly_rets else 0
+    neg_years = sum(1 for y in yearly_data if y["return_pct"] < 0)
+
+    # Equity curve for chart (sampled to ~500 points)
+    sample_step = max(1, len(eq) // 500)
+    eq_chart = []
+    for i in range(0, len(eq), sample_step):
+        eq_chart.append({
+            "date": str(eq_dates[i].date()),
+            "equity": round(float(eq[i]), 0),
+            "spy": round(float(spy_n[i]), 0),
+            "dd": round(float(dd_series[i]) * 100, 2),
+        })
 
     return {
         "cagr_pct": round(cagr * 100, 1),
         "spy_cagr_pct": round(spy_cagr * 100, 1),
         "alpha_pct": round((cagr - spy_cagr) * 100, 1),
         "sharpe": round(sharpe, 2),
+        "sortino": round(sortino, 2),
+        "calmar": round(calmar, 2),
         "max_drawdown_pct": round(max_dd * 100, 1),
         "total_return_pct": round((eq[-1] / eq[0] - 1) * 100, 1),
         "spy_return_pct": round((spy_n[-1] / spy_n[0] - 1) * 100, 1),
         "monthly_win_rate_pct": round(monthly_win_rate * 100, 1),
+        "daily_win_rate_pct": round(daily_win_rate * 100, 1),
+        "profit_factor": round(profit_factor, 2),
+        "ann_volatility_pct": round(ann_vol * 100, 1),
+        "best_day_pct": round(best_day * 100, 2),
+        "worst_day_pct": round(worst_day * 100, 2),
+        "avg_daily_ret_pct": round(avg_daily_ret * 100, 4),
+        "neg_years": neg_years,
         "total_trades": total_trades,
         "years": round(years, 1),
         "final_equity": round(float(eq[-1]), 0),
+        "monthly_returns": {str(yr): months for yr, months in sorted(monthly_data.items())},
+        "spy_monthly_returns": {str(yr): months for yr, months in sorted(spy_monthly_data.items())},
+        "yearly_returns": yearly_data,
+        "equity_curve": eq_chart,
     }

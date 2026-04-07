@@ -174,6 +174,399 @@ def _esc(s: str) -> str:
     return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+@app.get("/backtest", response_class=HTMLResponse)
+def backtest_page():
+    bt = _cached_backtest()
+    now = datetime.now(TZ_STHLM)
+
+    monthly = bt.get("monthly_returns", {})
+    spy_monthly = bt.get("spy_monthly_returns", {})
+    yearly = bt.get("yearly_returns", [])
+    eq_curve = bt.get("equity_curve", [])
+
+    MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+    def _heat_color(val: float) -> str:
+        if val > 8: return "rgba(16,185,129,0.55)"
+        if val > 4: return "rgba(16,185,129,0.35)"
+        if val > 1: return "rgba(16,185,129,0.18)"
+        if val > 0: return "rgba(16,185,129,0.08)"
+        if val > -1: return "rgba(239,68,68,0.08)"
+        if val > -4: return "rgba(239,68,68,0.18)"
+        if val > -8: return "rgba(239,68,68,0.35)"
+        return "rgba(239,68,68,0.55)"
+
+    def _text_color(val: float) -> str:
+        if val > 2: return "#34d399"
+        if val > 0: return "#6ee7b7"
+        if val > -2: return "#fca5a5"
+        return "#f87171"
+
+    # Build heatmap rows
+    heatmap_rows = ""
+    all_years = sorted(monthly.keys())
+    for yr in all_years:
+        months = monthly[yr]
+        yr_total = sum(months.values())
+        heatmap_rows += f'<tr><td class="yr-label">{yr}</td>'
+        for m in range(1, 13):
+            val = months.get(m)
+            if val is not None:
+                heatmap_rows += (
+                    f'<td class="heat-cell" style="background:{_heat_color(val)}">'
+                    f'<span style="color:{_text_color(val)}">{val:+.1f}</span></td>'
+                )
+            else:
+                heatmap_rows += '<td class="heat-cell empty"></td>'
+        yr_color = _text_color(yr_total)
+        yr_bg = _heat_color(yr_total)
+        heatmap_rows += f'<td class="heat-cell yr-total" style="background:{yr_bg}"><span style="color:{yr_color};font-weight:700">{yr_total:+.1f}</span></td></tr>'
+
+    # SPY heatmap
+    spy_heatmap_rows = ""
+    for yr in all_years:
+        months = spy_monthly.get(yr, {})
+        yr_total = sum(months.values())
+        spy_heatmap_rows += f'<tr><td class="yr-label">{yr}</td>'
+        for m in range(1, 13):
+            val = months.get(m)
+            if val is not None:
+                spy_heatmap_rows += (
+                    f'<td class="heat-cell" style="background:{_heat_color(val)}">'
+                    f'<span style="color:{_text_color(val)}">{val:+.1f}</span></td>'
+                )
+            else:
+                spy_heatmap_rows += '<td class="heat-cell empty"></td>'
+        yr_color = _text_color(yr_total)
+        yr_bg = _heat_color(yr_total)
+        spy_heatmap_rows += f'<td class="heat-cell yr-total" style="background:{yr_bg}"><span style="color:{yr_color};font-weight:700">{yr_total:+.1f}</span></td></tr>'
+
+    # Yearly comparison table
+    yearly_rows = ""
+    for y in yearly:
+        s_color = "#34d399" if y["return_pct"] > 0 else "#f87171"
+        spy_color = "#34d399" if y["spy_pct"] > 0 else "#f87171"
+        a_color = "#34d399" if y["alpha_pct"] > 0 else "#f87171"
+        beat = "var(--green)" if y["return_pct"] > y["spy_pct"] else "var(--red)"
+        yearly_rows += (
+            f'<tr><td class="sym">{y["year"]}</td>'
+            f'<td class="num" style="color:{s_color}">{y["return_pct"]:+.1f}%</td>'
+            f'<td class="num" style="color:{spy_color}">{y["spy_pct"]:+.1f}%</td>'
+            f'<td class="num" style="color:{a_color}">{y["alpha_pct"]:+.1f}%</td>'
+            f'<td><span style="color:{beat};font-weight:600">{"Beat" if y["return_pct"] > y["spy_pct"] else "Lost"}</span></td></tr>'
+        )
+
+    # Equity curve chart data
+    chart_dates = json.dumps([p["date"] for p in eq_curve])
+    chart_eq = json.dumps([p["equity"] for p in eq_curve])
+    chart_spy = json.dumps([p["spy"] for p in eq_curve])
+    chart_dd = json.dumps([p["dd"] for p in eq_curve])
+
+    bt_cagr = bt.get("cagr_pct", 0)
+    bt_spy_cagr = bt.get("spy_cagr_pct", 0)
+    bt_alpha = bt.get("alpha_pct", 0)
+    bt_sharpe = bt.get("sharpe", 0)
+    bt_sortino = bt.get("sortino", 0)
+    bt_calmar = bt.get("calmar", 0)
+    bt_dd = bt.get("max_drawdown_pct", 0)
+    bt_years = bt.get("years", 0)
+    bt_win = bt.get("monthly_win_rate_pct", 0)
+    bt_daily_win = bt.get("daily_win_rate_pct", 0)
+    bt_trades = bt.get("total_trades", 0)
+    bt_total_ret = bt.get("total_return_pct", 0)
+    bt_spy_ret = bt.get("spy_return_pct", 0)
+    bt_pf = bt.get("profit_factor", 0)
+    bt_vol = bt.get("ann_volatility_pct", 0)
+    bt_best = bt.get("best_day_pct", 0)
+    bt_worst = bt.get("worst_day_pct", 0)
+    bt_neg = bt.get("neg_years", 0)
+    bt_final = bt.get("final_equity", 0)
+    years_beat = sum(1 for y in yearly if y["return_pct"] > y["spy_pct"])
+
+    html = f"""<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Backtest Results | Momentum Bot</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='28' font-size='28'>📊</text></svg>">
+<style>
+:root {{ --bg:#09090b; --card:#111113; --border:#1e1e22; --text:#e4e4e7; --text-muted:#71717a; --text-dim:#3f3f46; --green:#10b981; --red:#ef4444; --amber:#f59e0b; --blue:#3b82f6; --radius:12px; }}
+* {{ margin:0; padding:0; box-sizing:border-box }}
+body {{ font-family:-apple-system,BlinkMacSystemFont,'Inter','Segoe UI',sans-serif; background:var(--bg); color:var(--text); padding:24px; max-width:1400px; margin:0 auto; -webkit-font-smoothing:antialiased; }}
+.header {{ display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:24px; padding-bottom:16px; border-bottom:1px solid var(--border); }}
+.header h1 {{ font-size:1.35rem; font-weight:700; color:#fff; letter-spacing:-0.02em; }}
+.header .sub {{ color:var(--text-muted); font-size:0.8rem; }}
+.header a {{ color:var(--blue); text-decoration:none; font-size:0.82rem; }}
+.header a:hover {{ text-decoration:underline; }}
+.card {{ background:var(--card); border:1px solid var(--border); border-radius:var(--radius); padding:20px; margin-bottom:16px; }}
+.card h2 {{ font-size:0.68rem; font-weight:600; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted); margin-bottom:14px; }}
+.grid-2 {{ display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px; }}
+.full {{ grid-column:1/-1; }}
+.kpi-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:10px; }}
+.kpi {{ text-align:center; padding:12px 8px; background:rgba(255,255,255,0.02); border-radius:8px; }}
+.kpi .v {{ font-size:1.2rem; font-weight:700; font-variant-numeric:tabular-nums; color:#fff; }}
+.kpi .l {{ font-size:0.6rem; color:var(--text-muted); margin-top:3px; text-transform:uppercase; letter-spacing:0.04em; }}
+table {{ width:100%; border-collapse:collapse; font-size:0.78rem; }}
+th {{ text-align:left; color:var(--text-muted); font-weight:500; padding:8px 6px; border-bottom:1px solid var(--border); font-size:0.65rem; text-transform:uppercase; letter-spacing:0.04em; }}
+td {{ padding:6px; border-bottom:1px solid #151518; }}
+.num {{ text-align:right; font-variant-numeric:tabular-nums; font-family:'SF Mono','Cascadia Code','Consolas',monospace; }}
+.sym {{ font-weight:600; color:#fff; }}
+.yr-label {{ font-weight:700; color:#fff; white-space:nowrap; padding-right:10px; }}
+.heat-cell {{ text-align:center; padding:4px 2px; font-size:0.7rem; font-family:'SF Mono','Consolas',monospace; min-width:52px; border:1px solid #0a0a0b; }}
+.heat-cell.empty {{ background:rgba(255,255,255,0.015); }}
+.heat-cell span {{ font-size:0.68rem; }}
+.yr-total {{ border-left:2px solid var(--border); }}
+canvas {{ width:100%!important; }}
+.tabs {{ display:flex; gap:2px; }}
+.tab {{ padding:8px 18px; background:transparent; border:1px solid var(--border); border-bottom:none; color:var(--text-muted); cursor:pointer; font-size:0.72rem; font-weight:600; border-radius:8px 8px 0 0; transition:all 0.15s; }}
+.tab.active {{ background:var(--card); color:#fff; }}
+.tab-body {{ background:var(--card); border:1px solid var(--border); border-radius:0 var(--radius) var(--radius) var(--radius); padding:20px; margin-bottom:16px; }}
+.tab-content {{ display:none; }}
+.tab-content.active {{ display:block; }}
+.footer {{ color:var(--text-dim); font-size:0.7rem; text-align:center; margin-top:20px; padding-top:16px; border-top:1px solid var(--border); }}
+.footer a {{ color:var(--text-dim); text-decoration:none; }}
+@media (max-width:768px) {{ body {{ padding:12px; }} .grid-2 {{ grid-template-columns:1fr; }} .kpi-grid {{ grid-template-columns:repeat(2,1fr); }} }}
+</style></head><body>
+
+<div class="header">
+  <div>
+    <h1>Backtest Results</h1>
+    <div class="sub">Multi-TF Momentum (20+60+126d) top-5 &middot; {bt_years} years &middot; 25bps round-trip &middot; $100k initial</div>
+  </div>
+  <a href="/">&larr; Back to Dashboard</a>
+</div>
+
+<!-- KPI Grid -->
+<div class="card">
+  <h2>Performance Summary</h2>
+  <div class="kpi-grid">
+    <div class="kpi"><div class="v" style="color:var(--green)">{bt_cagr:+.1f}%</div><div class="l">Strategy CAGR</div></div>
+    <div class="kpi"><div class="v">{bt_spy_cagr:+.1f}%</div><div class="l">SPY CAGR</div></div>
+    <div class="kpi"><div class="v" style="color:var(--green)">{bt_alpha:+.1f}%</div><div class="l">Alpha</div></div>
+    <div class="kpi"><div class="v">{bt_sharpe:.2f}</div><div class="l">Sharpe</div></div>
+    <div class="kpi"><div class="v">{bt_sortino:.2f}</div><div class="l">Sortino</div></div>
+    <div class="kpi"><div class="v">{bt_calmar:.2f}</div><div class="l">Calmar</div></div>
+    <div class="kpi"><div class="v" style="color:var(--red)">{bt_dd:.1f}%</div><div class="l">Max Drawdown</div></div>
+    <div class="kpi"><div class="v">{bt_vol:.1f}%</div><div class="l">Ann. Volatility</div></div>
+  </div>
+  <div class="kpi-grid" style="margin-top:10px">
+    <div class="kpi"><div class="v">{bt_total_ret:+,.0f}%</div><div class="l">Total Return</div></div>
+    <div class="kpi"><div class="v">{bt_spy_ret:+,.0f}%</div><div class="l">SPY Total Return</div></div>
+    <div class="kpi"><div class="v">${bt_final:,.0f}</div><div class="l">Final Equity</div></div>
+    <div class="kpi"><div class="v">{bt_trades:,}</div><div class="l">Total Trades</div></div>
+    <div class="kpi"><div class="v">{bt_win:.0f}%</div><div class="l">Monthly Win Rate</div></div>
+    <div class="kpi"><div class="v">{bt_daily_win:.0f}%</div><div class="l">Daily Win Rate</div></div>
+    <div class="kpi"><div class="v">{bt_pf:.2f}</div><div class="l">Profit Factor</div></div>
+    <div class="kpi"><div class="v">{bt_neg}</div><div class="l">Negative Years</div></div>
+  </div>
+  <div class="kpi-grid" style="margin-top:10px">
+    <div class="kpi"><div class="v" style="color:var(--green)">{bt_best:+.2f}%</div><div class="l">Best Day</div></div>
+    <div class="kpi"><div class="v" style="color:var(--red)">{bt_worst:+.2f}%</div><div class="l">Worst Day</div></div>
+    <div class="kpi"><div class="v" style="color:var(--green)">{years_beat}/{len(yearly)}</div><div class="l">Years Beat SPY</div></div>
+    <div class="kpi"><div class="v">{bt_trades // max(int(bt_years),1)}</div><div class="l">Trades/Year</div></div>
+  </div>
+</div>
+
+<!-- Equity Curve -->
+<div class="card">
+  <h2>Equity Curve &mdash; Strategy vs SPY</h2>
+  <canvas id="eqChart" height="260"></canvas>
+</div>
+
+<!-- Drawdown Chart -->
+<div class="card">
+  <h2>Underwater (Drawdown) Chart</h2>
+  <canvas id="ddChart" height="160"></canvas>
+</div>
+
+<!-- Monthly Returns Heatmap with Tabs -->
+<div>
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab(event,'heatStrat')">Strategy Monthly Returns (%)</button>
+    <button class="tab" onclick="switchTab(event,'heatSpy')">SPY Monthly Returns (%)</button>
+  </div>
+  <div class="tab-body" style="overflow-x:auto">
+    <div id="heatStrat" class="tab-content active">
+      <table>
+        <thead><tr><th>Year</th>{''.join(f'<th style="text-align:center">{m}</th>' for m in MONTHS)}<th style="text-align:center;border-left:2px solid var(--border)">Year</th></tr></thead>
+        <tbody>{heatmap_rows}</tbody>
+      </table>
+    </div>
+    <div id="heatSpy" class="tab-content">
+      <table>
+        <thead><tr><th>Year</th>{''.join(f'<th style="text-align:center">{m}</th>' for m in MONTHS)}<th style="text-align:center;border-left:2px solid var(--border)">Year</th></tr></thead>
+        <tbody>{spy_heatmap_rows}</tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Yearly Returns Table -->
+<div class="card">
+  <h2>Annual Returns Comparison</h2>
+  <table>
+    <thead><tr><th>Year</th><th class="num">Strategy</th><th class="num">SPY</th><th class="num">Alpha</th><th>vs SPY</th></tr></thead>
+    <tbody>{yearly_rows}</tbody>
+  </table>
+</div>
+
+<div class="footer">
+  <a href="/">&larr; Back to Dashboard</a> &middot; Backtest uses 25bps round-trip costs, weekly rebalance, SMA(200) trend filter
+</div>
+
+<script>
+function switchTab(e, id) {{
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  e.target.classList.add('active');
+}}
+
+// Equity curve chart
+(function() {{
+  const dates = {chart_dates};
+  const eq = {chart_eq};
+  const spy = {chart_spy};
+  if (!dates.length) return;
+
+  const canvas = document.getElementById('eqChart');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  const W = rect.width, H = rect.height;
+  const pad = {{t:24, r:70, b:32, l:12}};
+  const cW = W - pad.l - pad.r, cH = H - pad.t - pad.b;
+
+  const allV = eq.concat(spy);
+  const minV = 0;
+  const maxV = Math.max(...allV) * 1.05;
+
+  function xp(i) {{ return pad.l + (i / (dates.length - 1)) * cW; }}
+  function yp(v) {{ return pad.t + (1 - (v - minV) / (maxV - minV)) * cH; }}
+
+  // Grid
+  ctx.strokeStyle = '#1a1a1e'; ctx.lineWidth = 1;
+  for (let i = 0; i <= 5; i++) {{
+    const val = minV + (maxV - minV) * (i / 5);
+    const yy = yp(val);
+    ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(W - pad.r, yy); ctx.stroke();
+    ctx.fillStyle = '#3f3f46'; ctx.font = '10px -apple-system,sans-serif'; ctx.textAlign = 'right';
+    if (val >= 1e6) ctx.fillText('$' + (val/1e6).toFixed(1) + 'M', W-pad.r+52, yy+4);
+    else if (val >= 1e3) ctx.fillText('$' + (val/1e3).toFixed(0) + 'K', W-pad.r+52, yy+4);
+    else ctx.fillText('$' + val.toFixed(0), W-pad.r+52, yy+4);
+  }}
+
+  // SPY fill
+  ctx.beginPath();
+  ctx.moveTo(xp(0), yp(spy[0]));
+  for (let i = 1; i < dates.length; i++) ctx.lineTo(xp(i), yp(spy[i]));
+  ctx.lineTo(xp(dates.length-1), yp(0));
+  ctx.lineTo(xp(0), yp(0));
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(113,113,122,0.06)';
+  ctx.fill();
+
+  // Equity fill
+  ctx.beginPath();
+  ctx.moveTo(xp(0), yp(eq[0]));
+  for (let i = 1; i < dates.length; i++) ctx.lineTo(xp(i), yp(eq[i]));
+  ctx.lineTo(xp(dates.length-1), yp(0));
+  ctx.lineTo(xp(0), yp(0));
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(16,185,129,0.08)';
+  ctx.fill();
+
+  // SPY line
+  ctx.beginPath(); ctx.strokeStyle = '#71717a'; ctx.lineWidth = 1.5; ctx.setLineDash([4,3]);
+  ctx.moveTo(xp(0), yp(spy[0]));
+  for (let i = 1; i < dates.length; i++) ctx.lineTo(xp(i), yp(spy[i]));
+  ctx.stroke(); ctx.setLineDash([]);
+
+  // Equity line
+  ctx.beginPath(); ctx.strokeStyle = '#10b981'; ctx.lineWidth = 2;
+  ctx.moveTo(xp(0), yp(eq[0]));
+  for (let i = 1; i < dates.length; i++) ctx.lineTo(xp(i), yp(eq[i]));
+  ctx.stroke();
+
+  // Legend
+  const lx = pad.l + 10;
+  ctx.font = '12px -apple-system,sans-serif';
+  ctx.fillStyle = 'rgba(17,17,19,0.92)'; ctx.fillRect(lx-6, 4, 180, 26);
+  ctx.strokeStyle = '#1e1e22'; ctx.lineWidth = 1; ctx.strokeRect(lx-6, 4, 180, 26);
+  ctx.lineWidth = 2; ctx.strokeStyle = '#10b981'; ctx.beginPath(); ctx.moveTo(lx, 18); ctx.lineTo(lx+20, 18); ctx.stroke();
+  ctx.fillStyle = '#10b981'; ctx.fillText('Strategy', lx+24, 22);
+  ctx.strokeStyle = '#71717a'; ctx.setLineDash([4,3]); ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(lx+90, 18); ctx.lineTo(lx+110, 18); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle = '#71717a'; ctx.fillText('SPY', lx+114, 22);
+
+  // Dates
+  ctx.fillStyle = '#3f3f46'; ctx.font = '10px -apple-system,sans-serif'; ctx.textAlign = 'center';
+  const step = Math.max(1, Math.floor(dates.length / 8));
+  for (let i = 0; i < dates.length; i += step) ctx.fillText(dates[i].slice(0,4), xp(i), H-8);
+}})();
+
+// Drawdown chart
+(function() {{
+  const dates = {chart_dates};
+  const dd = {chart_dd};
+  if (!dates.length) return;
+
+  const canvas = document.getElementById('ddChart');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  const W = rect.width, H = rect.height;
+  const pad = {{t:12, r:50, b:28, l:12}};
+  const cW = W - pad.l - pad.r, cH = H - pad.t - pad.b;
+
+  const minDD = Math.min(...dd) * 1.1;
+  function xp(i) {{ return pad.l + (i / (dates.length - 1)) * cW; }}
+  function yp(v) {{ return pad.t + (v / minDD) * cH; }}
+
+  // Grid
+  ctx.strokeStyle = '#1a1a1e'; ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {{
+    const val = minDD * (i / 4);
+    const yy = yp(val);
+    ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(W-pad.r, yy); ctx.stroke();
+    ctx.fillStyle = '#3f3f46'; ctx.font = '10px -apple-system,sans-serif'; ctx.textAlign = 'right';
+    ctx.fillText(val.toFixed(0) + '%', W-pad.r+38, yy+4);
+  }}
+
+  // Zero line
+  ctx.strokeStyle = '#3f3f46'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(pad.l, pad.t); ctx.lineTo(W-pad.r, pad.t); ctx.stroke();
+
+  // Fill
+  ctx.beginPath();
+  ctx.moveTo(xp(0), pad.t);
+  for (let i = 0; i < dates.length; i++) ctx.lineTo(xp(i), yp(dd[i]));
+  ctx.lineTo(xp(dates.length-1), pad.t);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(239,68,68,0.12)';
+  ctx.fill();
+
+  // Line
+  ctx.beginPath(); ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 1.2;
+  ctx.moveTo(xp(0), yp(dd[0]));
+  for (let i = 1; i < dates.length; i++) ctx.lineTo(xp(i), yp(dd[i]));
+  ctx.stroke();
+
+  // Dates
+  ctx.fillStyle = '#3f3f46'; ctx.font = '10px -apple-system,sans-serif'; ctx.textAlign = 'center';
+  const step = Math.max(1, Math.floor(dates.length / 8));
+  for (let i = 0; i < dates.length; i += step) ctx.fillText(dates[i].slice(0,4), xp(i), H-6);
+}})();
+</script>
+</body></html>"""
+    return html
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     sig = _cached_signal()
@@ -825,7 +1218,10 @@ canvas {{ width: 100% !important; max-height: 240px; }}
 
 <!-- Backtest Performance -->
 <div class="card full" style="margin-bottom:16px">
-  <h2>Backtest Performance &mdash; {bt_years} years, 25bps round-trip</h2>
+  <h2 style="display:flex;justify-content:space-between;align-items:center">
+    <span>Backtest Performance &mdash; {bt_years} years, 25bps round-trip</span>
+    <a href="/backtest" style="font-size:0.72rem;color:var(--blue);text-decoration:none;text-transform:none;letter-spacing:0;font-weight:500">View Full Backtest &rarr;</a>
+  </h2>
   <div class="bt-row">
     <div class="bt-kpi"><div class="v" style="color:var(--green)">{bt_cagr:+.1f}%</div><div class="l">Strategy CAGR</div></div>
     <div class="bt-kpi"><div class="v">{bt_spy:+.1f}%</div><div class="l">SPY CAGR</div></div>
