@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Momentum Rotation Trading Bot - Single entry point.
+Multi-TF Momentum Rotation Bot - Single entry point.
 
 Usage:
-    python run.py download          Download 15 years of daily data
+    python run.py download          Download 15+ years of daily data
     python run.py backtest          Run backtest and show results
     python run.py signal            Show today's signal (what to buy/sell)
     python run.py trade             Dry run (compute orders, don't send)
@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -50,18 +51,19 @@ def cmd_backtest():
     config = Config()
     m = backtest(daily, config)
 
-    print(f"\n{'=' * 50}")
-    print(f"  BACKTEST RESULTS  ({m['years']} years)")
-    print(f"{'=' * 50}")
+    print(f"\n{'=' * 55}")
+    print(f"  BACKTEST RESULTS  ({m['years']} years, 25bps cost)")
+    print(f"{'=' * 55}")
     print(f"  Strategy CAGR:    {m['cagr_pct']:+.1f}%")
     print(f"  SPY CAGR:         {m['spy_cagr_pct']:+.1f}%")
     print(f"  Alpha:            {m['alpha_pct']:+.1f}%")
     print(f"  Sharpe:           {m['sharpe']:.2f}")
     print(f"  Max drawdown:     {m['max_drawdown_pct']:.1f}%")
+    print(f"  Monthly win rate: {m['monthly_win_rate_pct']:.0f}%")
     print(f"  Total return:     {m['total_return_pct']:+.1f}%  (SPY: {m['spy_return_pct']:+.1f}%)")
     print(f"  Final equity:     ${m['final_equity']:,.0f}")
     print(f"  Trades:           {m['total_trades']}")
-    print(f"{'=' * 50}")
+    print(f"{'=' * 55}")
 
 
 def cmd_signal():
@@ -89,6 +91,21 @@ def cmd_signal():
             print(f"  {sym:6s} {score:+.1f}%")
 
 
+def _validate_signal_freshness(signal: dict) -> bool:
+    """Ensure signal is based on recent data, not stale."""
+    sig_date = signal.get("date", "")
+    if not sig_date:
+        return False
+    from datetime import date
+    sig = date.fromisoformat(sig_date)
+    today = date.today()
+    delta = (today - sig).days
+    if delta > 5:
+        log.warning(f"Signal date {sig_date} is {delta} days old - data may be stale")
+        return False
+    return True
+
+
 def cmd_trade(live: bool = False):
     from strategy.data import fetch_live
     from strategy.engine import Config, compute_signal
@@ -96,7 +113,7 @@ def cmd_trade(live: bool = False):
 
     config = Config()
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    trade_log = {
+    trade_log: dict = {
         "run_id": ts,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "live": live,
@@ -106,14 +123,14 @@ def cmd_trade(live: bool = False):
 
     def step(msg: str, data: dict | None = None):
         log.info(msg)
-        entry = {"time": datetime.now(timezone.utc).isoformat(), "msg": msg}
+        entry: dict = {"time": datetime.now(timezone.utc).isoformat(), "msg": msg}
         if data:
             entry["data"] = data
         trade_log["steps"].append(entry)
 
     def error(msg: str, data: dict | None = None):
         log.error(msg)
-        entry = {"time": datetime.now(timezone.utc).isoformat(), "msg": msg}
+        entry: dict = {"time": datetime.now(timezone.utc).isoformat(), "msg": msg}
         if data:
             entry["data"] = data
         trade_log["errors"].append(entry)
@@ -121,13 +138,22 @@ def cmd_trade(live: bool = False):
     try:
         step("Fetching live prices from Yahoo Finance")
         daily = fetch_live()
-        step(f"Fetched {len(daily)} price rows")
+        n_syms = daily["symbol"].nunique()
+        n_rows = len(daily)
+        step(f"Fetched {n_rows} rows for {n_syms} symbols")
+
+        if n_syms < 10:
+            error(f"Only {n_syms} symbols fetched - data quality issue")
 
         step("Computing signal")
         signal = compute_signal(daily, config)
         trade_log["signal"] = {k: v for k, v in signal.items() if k != "spy_history"}
 
+        if not _validate_signal_freshness(signal):
+            error(f"Signal based on stale data: {signal.get('date', '?')}")
+
         step(f"Signal: action={signal.get('action')} trend={signal.get('trend')} "
+             f"strength={signal.get('trend_strength', 0):.0f}% "
              f"SPY=${signal.get('spy_price', 0):.2f} SMA=${signal.get('spy_sma', 0):.2f} "
              f"exposure={signal.get('exposure', 1):.1%}")
 
@@ -147,15 +173,20 @@ def cmd_trade(live: bool = False):
         if live:
             step("Connecting to IBKR Gateway")
             if not broker.connect():
-                error("Could not connect to IBKR Gateway")
+                error("Could not connect to IBKR Gateway after retries")
                 _save_trade_log(trade_log, ts)
                 return
+
+            cancelled = broker.cancel_all_orders()
+            if cancelled:
+                step(f"Cancelled {cancelled} stale open orders")
 
             positions = broker.get_positions()
             current_pos = {p.symbol: p.quantity for p in positions}
             equity = broker.get_equity() or 100_000.0
             currency = broker.get_currency()
-            step(f"IBKR connected: equity={equity:,.2f} {currency}, positions={current_pos or 'none'}")
+            step(f"IBKR connected: equity={equity:,.2f} {currency}, "
+                 f"positions={current_pos or 'none'}")
             trade_log["account"] = {
                 "equity": equity,
                 "currency": currency,
@@ -177,8 +208,8 @@ def cmd_trade(live: bool = False):
             scaled_equity = equity * exposure
             alloc_per_stock = scaled_equity / len(target)
             prices = signal.get("prices", {})
-            step(f"Position sizing: equity={equity:,.0f} x exposure={exposure:.1%} = {scaled_equity:,.0f}, "
-                 f"per-stock={alloc_per_stock:,.0f}")
+            step(f"Position sizing: equity={equity:,.0f} x exposure={exposure:.1%} "
+                 f"= {scaled_equity:,.0f}, per-stock={alloc_per_stock:,.0f}")
 
             for sym in target:
                 price = prices.get(sym, 0)
@@ -187,15 +218,21 @@ def cmd_trade(live: bool = False):
                     continue
 
                 desired_qty = int(alloc_per_stock / price)
+                if desired_qty <= 0:
+                    error(f"Computed 0 shares for {sym} (alloc={alloc_per_stock:.0f}, price={price:.2f})")
+                    continue
+
                 current_qty = int(current_pos.get(sym, 0))
                 delta = desired_qty - current_qty
 
                 if delta > 0:
                     orders.append(OrderRequest(sym, "BUY", delta))
-                    step(f"Order: BUY {delta} {sym} @ ~${price:.2f} (have {current_qty}, want {desired_qty})")
+                    step(f"Order: BUY {delta} {sym} @ ~${price:.2f} "
+                         f"(have {current_qty}, want {desired_qty})")
                 elif delta < 0:
                     orders.append(OrderRequest(sym, "SELL", abs(delta)))
-                    step(f"Order: SELL {abs(delta)} {sym} (rebalance: have {current_qty}, want {desired_qty})")
+                    step(f"Order: SELL {abs(delta)} {sym} "
+                         f"(rebalance: have {current_qty}, want {desired_qty})")
                 else:
                     step(f"No change for {sym} (already holding {current_qty})")
 
@@ -207,18 +244,22 @@ def cmd_trade(live: bool = False):
         if not orders:
             step("No trades needed - portfolio already matches target")
         elif live:
-            step(f"Submitting {len(orders)} orders to IBKR")
-            results = []
-            for o in orders:
-                result = broker.submit_order(o)
-                results.append(result)
-                status = result.get("status", "unknown")
-                filled = result.get("filled", 0)
-                avg_px = result.get("avg_price", 0)
-                step(f"  {o.side} {o.quantity} {o.symbol}: status={status} filled={filled} avg_price={avg_px}", result)
+            step(f"Submitting {len(orders)} orders to IBKR (sells first, then buys)")
+            results = broker.submit_orders_batch(orders)
 
-                if status in ("ApiError", "Cancelled", "Inactive"):
-                    error(f"Order failed: {o.side} {o.quantity} {o.symbol} -> {status}", result)
+            for r in results:
+                status = r.get("status", "unknown")
+                sym = r.get("symbol", "?")
+                side = r.get("side", "?")
+                qty = r.get("quantity", 0)
+                filled = r.get("filled", 0)
+                avg_px = r.get("avg_price", 0)
+                step(f"  {side} {qty} {sym}: status={status} filled={filled} "
+                     f"avg_price={avg_px}", r)
+
+                if status in ("ApiError", "Cancelled", "Inactive", "exception",
+                              "not_connected", "qualify_failed"):
+                    error(f"Order failed: {side} {qty} {sym} -> {status}", r)
 
             trade_log["order_results"] = results
 
@@ -230,7 +271,10 @@ def cmd_trade(live: bool = False):
             step(f"Post-trade: equity={final_equity:,.2f} {currency}")
             trade_log["post_trade"] = {
                 "equity": final_equity,
-                "positions": {p.symbol: {"qty": p.quantity, "cost": p.avg_cost} for p in final_positions},
+                "positions": {
+                    p.symbol: {"qty": p.quantity, "cost": p.avg_cost}
+                    for p in final_positions
+                },
             }
             broker.disconnect()
             step("Disconnected from IBKR")
@@ -238,15 +282,13 @@ def cmd_trade(live: bool = False):
             step(f"DRY RUN - {len(orders)} orders NOT sent. Use --live to execute.")
 
     except Exception as e:
-        error(f"Unhandled exception: {e}", {"traceback": str(e)})
-        import traceback
+        error(f"Unhandled exception: {e}", {"traceback": traceback.format_exc()})
         log.exception("Trade run failed")
 
     _save_trade_log(trade_log, ts)
 
 
 def _save_trade_log(trade_log: dict, ts: str):
-    """Save detailed trade log as JSON."""
     path = LOG_DIR / f"{ts}.json"
     path.write_text(json.dumps(trade_log, indent=2, default=str))
     log.info(f"Trade log saved: {path}")

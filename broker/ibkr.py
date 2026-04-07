@@ -2,10 +2,13 @@
 Interactive Brokers execution via ib_insync.
 
 Submits MOC (Market-On-Close) orders that fill at the 4 PM closing auction.
+Includes retry logic, order verification, and comprehensive error handling.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -30,6 +33,8 @@ class Position:
 
 
 class IBKRBroker:
+    MAX_CONNECT_RETRIES = 3
+
     def __init__(self, host: str = "127.0.0.1", port: int = 4002, client_id: int = 1):
         self._host = host
         self._port = port
@@ -37,28 +42,35 @@ class IBKRBroker:
         self._ib: Any = None
 
     def connect(self) -> bool:
-        try:
-            import asyncio
+        for attempt in range(1, self.MAX_CONNECT_RETRIES + 1):
             try:
-                asyncio.get_event_loop()
-            except RuntimeError:
-                asyncio.set_event_loop(asyncio.new_event_loop())
+                try:
+                    asyncio.get_event_loop()
+                except RuntimeError:
+                    asyncio.set_event_loop(asyncio.new_event_loop())
 
-            from ib_insync import IB
-            self._ib = IB()
-            self._ib.connect(self._host, self._port, clientId=self._client_id, timeout=15)
-            log.info(f"Connected to IBKR at {self._host}:{self._port}")
-            return True
-        except ImportError:
-            log.error("ib_insync not installed: pip install ib_insync")
-            return False
-        except Exception as e:
-            log.error(f"IBKR connection failed: {e}")
-            return False
+                from ib_insync import IB
+                self._ib = IB()
+                self._ib.connect(self._host, self._port, clientId=self._client_id, timeout=20)
+                log.info(f"Connected to IBKR at {self._host}:{self._port} (attempt {attempt})")
+                return True
+            except ImportError:
+                log.error("ib_insync not installed: pip install ib_insync")
+                return False
+            except Exception as e:
+                log.warning(f"IBKR connect attempt {attempt}/{self.MAX_CONNECT_RETRIES} failed: {e}")
+                if attempt < self.MAX_CONNECT_RETRIES:
+                    time.sleep(2 * attempt)
+                else:
+                    log.error(f"IBKR connection failed after {self.MAX_CONNECT_RETRIES} attempts")
+        return False
 
     def disconnect(self) -> None:
         if self._ib:
-            self._ib.disconnect()
+            try:
+                self._ib.disconnect()
+            except Exception:
+                pass
             self._ib = None
 
     def is_connected(self) -> bool:
@@ -69,8 +81,8 @@ class IBKRBroker:
             return []
         positions = []
         for p in self._ib.positions():
-            pnl = 0.0
             mv = 0.0
+            pnl = 0.0
             if hasattr(p, "marketValue"):
                 mv = float(p.marketValue or 0)
             if hasattr(p, "unrealizedPNL"):
@@ -101,7 +113,6 @@ class IBKRBroker:
         return "USD"
 
     def get_account_summary(self) -> dict:
-        """Get a comprehensive account snapshot."""
         if not self._ib:
             return {}
         result = {}
@@ -115,6 +126,16 @@ class IBKRBroker:
                 result[av.tag] = {"value": float(av.value), "currency": av.currency}
         return result
 
+    def cancel_all_orders(self) -> int:
+        if not self._ib:
+            return 0
+        open_orders = self._ib.openOrders()
+        for order in open_orders:
+            self._ib.cancelOrder(order)
+        if open_orders:
+            self._ib.sleep(2)
+        return len(open_orders)
+
     def submit_order(self, req: OrderRequest) -> dict:
         if not self._ib:
             return {"status": "not_connected", "symbol": req.symbol}
@@ -125,12 +146,13 @@ class IBKRBroker:
             contract = Stock(req.symbol, "SMART", "USD")
             qualified = self._ib.qualifyContracts(contract)
             if not qualified:
-                return {"status": "qualify_failed", "symbol": req.symbol}
+                return {"status": "qualify_failed", "symbol": req.symbol,
+                        "error": f"Could not qualify contract for {req.symbol}"}
 
             action = "BUY" if req.side.upper() == "BUY" else "SELL"
             order = Order(action=action, totalQuantity=req.quantity, orderType=req.order_type)
-            trade = self._ib.placeOrder(contract, order)
 
+            trade = self._ib.placeOrder(contract, order)
             self._ib.sleep(3)
 
             filled = trade.orderStatus.filled
@@ -162,12 +184,23 @@ class IBKRBroker:
             log.error(f"Order submission failed for {req.symbol}: {e}")
             return {"status": "exception", "symbol": req.symbol, "error": str(e)}
 
-    def cancel_all_orders(self) -> int:
-        """Cancel all open orders. Returns count cancelled."""
-        if not self._ib:
-            return 0
-        open_orders = self._ib.openOrders()
-        for order in open_orders:
-            self._ib.cancelOrder(order)
-        self._ib.sleep(2)
-        return len(open_orders)
+    def submit_orders_batch(self, orders: list[OrderRequest]) -> list[dict]:
+        """Submit sells first, then buys. Returns results for each order."""
+        sells = [o for o in orders if o.side.upper() == "SELL"]
+        buys = [o for o in orders if o.side.upper() == "BUY"]
+
+        results = []
+        for o in sells:
+            result = self.submit_order(o)
+            results.append(result)
+            log.info(f"  SELL {o.quantity} {o.symbol}: {result.get('status', '?')}")
+
+        if sells and buys:
+            self._ib.sleep(1)
+
+        for o in buys:
+            result = self.submit_order(o)
+            results.append(result)
+            log.info(f"  BUY {o.quantity} {o.symbol}: {result.get('status', '?')}")
+
+        return results
