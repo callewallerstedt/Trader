@@ -271,7 +271,7 @@ def cmd_trade(live: bool = False):
                 alloc = scaled_equity * weight
                 desired_qty = int(alloc / price)
                 if desired_qty <= 0:
-                    error(f"Computed 0 shares for {sym} (alloc={alloc:.0f}, price={price:.2f}, weight={weight:.1%})")
+                    step(f"Skip {sym}: alloc ${alloc:.0f} < 1 share @ ${price:.2f} (weight={weight:.1%})")
                     continue
 
                 current_qty = int(current_pos.get(sym, 0))

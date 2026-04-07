@@ -664,6 +664,9 @@ def dashboard():
         next_run_et = today_et
     next_run_sthlm = next_run_et.astimezone(TZ_STHLM)
     next_run_str = next_run_sthlm.strftime("%a %b %d, %H:%M")
+
+    equity_cap_sek = int(os.environ.get("EQUITY_CAP_SEK", 0))
+    equity_cap_usd = equity_cap_sek / (1.0 / ibkr.get("fx_rate_to_usd", 0.105)) if equity_cap_sek else 0
     time_until = next_run_et - now_et
     total_secs = max(time_until.total_seconds(), 0)
     hours_until = int(total_secs // 3600)
@@ -717,7 +720,8 @@ def dashboard():
     target_set = set(holdings)
     plan_rows = ""
     if action == "hold" and holdings:
-        scaled_eq = ibkr_equity * eff_exposure if ibkr_equity > 0 else 100_000 * eff_exposure
+        sizing_equity = min(ibkr_equity, equity_cap_usd) if equity_cap_usd > 0 else ibkr_equity
+        scaled_eq = sizing_equity * eff_exposure if sizing_equity > 0 else 100_000 * eff_exposure
 
         to_sell = current_pos_set - target_set
         to_buy_new = target_set - current_pos_set
@@ -1240,6 +1244,7 @@ canvas {{ width: 100% !important; max-height: 240px; }}
     <div class="kpi"><div class="v sm" style="color:{real_color}">{realized:+,.0f}</div><div class="l">Realized</div></div>
     <div class="kpi"><div class="v sm">{buying_power:,.0f}</div><div class="l">Buying Power</div></div>
   </div>
+  {f'<div style="margin-top:10px;padding:6px 10px;background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.3);border-radius:6px;font-size:0.75rem;color:#f59e0b">Paper cap: {equity_cap_sek:,} SEK (~${equity_cap_usd:,.0f} USD) &mdash; sizing as if account = {equity_cap_sek:,} SEK</div>' if equity_cap_sek else ''}
 </div>
 
 <div class="card" style="text-align:center">
@@ -1293,7 +1298,7 @@ canvas {{ width: 100% !important; max-height: 240px; }}
   <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:12px">
     <div style="font-size:0.8rem;color:var(--text-muted)">Target: <strong style="color:#fff">{', '.join(holdings) if holdings else 'CASH'}</strong></div>
     <div style="font-size:0.8rem;color:var(--text-muted)">Exposure: <strong style="color:#fff">{eff_exposure:.0%}</strong></div>
-    <div style="font-size:0.8rem;color:var(--text-muted)">Account: <strong style="color:#fff">{ibkr_equity_raw:,.0f} {ibkr_currency} (${ibkr_equity:,.0f} USD)</strong></div>
+    <div style="font-size:0.8rem;color:var(--text-muted)">Account: <strong style="color:#fff">{f"{equity_cap_sek:,} SEK cap (~${equity_cap_usd:,.0f} USD)" if equity_cap_sek else f"{ibkr_equity_raw:,.0f} {ibkr_currency} (${ibkr_equity:,.0f} USD)"}</strong></div>
     <div style="font-size:0.8rem;color:var(--text-muted)">Currently holding: <strong style="color:#fff">{', '.join(sorted(current_pos_set)) if current_pos_set else 'nothing'}</strong></div>
   </div>
   <table>
