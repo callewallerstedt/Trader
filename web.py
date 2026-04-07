@@ -88,10 +88,18 @@ def _get_ibkr_status() -> dict:
         positions = broker.get_positions()
         summary = broker.get_account_summary()
         broker.disconnect()
+
+        fx_rate = 1.0
+        if currency.upper() != "USD":
+            from strategy.data import fetch_fx_rate
+            fx_rate = fetch_fx_rate(currency, "USD") or 1.0
+
         return {
             "connected": True,
             "equity": equity,
             "currency": currency,
+            "fx_rate_to_usd": fx_rate,
+            "equity_usd": equity * fx_rate,
             "positions": [
                 {"symbol": p.symbol, "qty": p.quantity, "avg_cost": p.avg_cost,
                  "unrealized_pnl": p.unrealized_pnl}
@@ -666,10 +674,14 @@ def dashboard():
     chart_sma = json.dumps([d["sma"] for d in spy_history])
 
     ibkr_connected = ibkr.get("connected", False)
-    ibkr_equity = ibkr.get("equity", 0)
+    ibkr_equity_raw = ibkr.get("equity", 0)
     ibkr_currency = ibkr.get("currency", "?")
     ibkr_positions = ibkr.get("positions", [])
     ibkr_summary = ibkr.get("summary", {})
+
+    # Convert equity to USD for position sizing (stock prices are in USD)
+    ibkr_fx_rate = ibkr.get("fx_rate_to_usd", 1.0)
+    ibkr_equity = ibkr_equity_raw * ibkr_fx_rate
 
     gw_color = "#10b981" if ibkr_connected else "#ef4444"
     gw_text = "CONNECTED" if ibkr_connected else "OFFLINE"
@@ -1219,7 +1231,7 @@ canvas {{ width: 100% !important; max-height: 240px; }}
   <h2>IBKR Gateway</h2>
   <div class="gw-pill"><span class="dot"></span>{gw_text}</div>
   <div class="kpi-row">
-    <div class="kpi"><div class="v sm">{ibkr_equity:,.0f}</div><div class="l">Net Liq ({ibkr_currency})</div></div>
+    <div class="kpi"><div class="v sm">{ibkr_equity_raw:,.0f}</div><div class="l">Net Liq ({ibkr_currency})</div></div>
     <div class="kpi"><div class="v sm">{cash_val:,.0f}</div><div class="l">Cash</div></div>
     <div class="kpi"><div class="v sm">{gross_pos:,.0f}</div><div class="l">Invested</div></div>
   </div>
@@ -1281,7 +1293,7 @@ canvas {{ width: 100% !important; max-height: 240px; }}
   <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:12px">
     <div style="font-size:0.8rem;color:var(--text-muted)">Target: <strong style="color:#fff">{', '.join(holdings) if holdings else 'CASH'}</strong></div>
     <div style="font-size:0.8rem;color:var(--text-muted)">Exposure: <strong style="color:#fff">{eff_exposure:.0%}</strong></div>
-    <div style="font-size:0.8rem;color:var(--text-muted)">Account: <strong style="color:#fff">{ibkr_equity:,.0f} {ibkr_currency}</strong></div>
+    <div style="font-size:0.8rem;color:var(--text-muted)">Account: <strong style="color:#fff">{ibkr_equity_raw:,.0f} {ibkr_currency} (${ibkr_equity:,.0f} USD)</strong></div>
     <div style="font-size:0.8rem;color:var(--text-muted)">Currently holding: <strong style="color:#fff">{', '.join(sorted(current_pos_set)) if current_pos_set else 'nothing'}</strong></div>
   </div>
   <table>

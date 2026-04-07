@@ -112,6 +112,24 @@ def fetch_vix_live(lookback_days: int = 30) -> float | None:
         return None
 
 
+def fetch_fx_rate(from_ccy: str, to_ccy: str = "USD") -> float | None:
+    """Fetch exchange rate (e.g., SEK -> USD). Returns how many to_ccy per 1 from_ccy."""
+    if from_ccy.upper() == to_ccy.upper():
+        return 1.0
+    pair = f"{from_ccy}{to_ccy}=X"
+    try:
+        df = yf.download(pair, period="5d", interval="1d", progress=False, auto_adjust=True)
+        if df.empty:
+            return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+        df.columns = [c.lower() for c in df.columns]
+        return float(df["close"].iloc[-1])
+    except Exception as e:
+        log.warning(f"Failed to fetch FX rate {pair}: {e}")
+        return None
+
+
 def fetch_live(symbols: list[str] | None = None, lookback_days: int = 600) -> pd.DataFrame:
     """Fetch recent daily prices from Yahoo Finance for live signal computation."""
     from datetime import datetime, timedelta
