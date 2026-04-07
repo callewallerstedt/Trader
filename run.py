@@ -74,12 +74,13 @@ def cmd_signal():
 
     print(f"\nDate:      {signal.get('date', '?')}")
     print(f"SPY:       ${signal.get('spy_price', 0):.2f}")
-    print(f"SMA(100):  ${signal.get('spy_sma', 0):.2f}")
+    print(f"SMA(200):  ${signal.get('spy_sma', 0):.2f}")
     print(f"SPY vs SMA:{signal.get('spy_pct_vs_sma', 0):+.2f}%")
-    print(f"Trend:     {signal.get('trend', '?')} ({signal.get('days_in_regime', '?')} days)")
+    print(f"Trend:     {signal.get('trend', '?')} (strength: {signal.get('trend_strength', 0):.0f}%)")
     print(f"Exposure:  {signal.get('exposure', 1):.1%}")
     print(f"Vol (ann): {signal.get('realized_vol', 0):.1f}%")
     print(f"Action:    {signal.get('action', '?')}")
+    print(f"Strategy:  {signal.get('strategy', '?')}")
     if signal.get("target_holdings"):
         print(f"Hold:      {', '.join(signal['target_holdings'])}")
     if signal.get("momentum_scores"):
@@ -136,7 +137,7 @@ def cmd_trade(live: bool = False):
             return
 
         target = set(signal.get("target_holdings", []))
-        exposure = signal.get("exposure", 1.0)
+        exposure = signal.get("effective_exposure", signal.get("exposure", 1.0))
 
         broker = IBKRBroker()
         current_pos: dict[str, float] = {}

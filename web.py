@@ -170,6 +170,7 @@ def dashboard():
 
     action = sig.get("action", "unknown")
     trend = sig.get("trend", "?")
+    trend_strength = sig.get("trend_strength", 0)
     spy_price = sig.get("spy_price", 0)
     spy_sma = sig.get("spy_sma", 0)
     spy_pct = sig.get("spy_pct_vs_sma", 0)
@@ -180,6 +181,7 @@ def dashboard():
     realized_vol = sig.get("realized_vol", 0)
     days_in_regime = sig.get("days_in_regime", "?")
     spy_history = sig.get("spy_history", [])
+    strategy_name = sig.get("strategy", "Multi-TF Momentum")
 
     if action == "hold":
         status_color = "#22c55e"
@@ -319,7 +321,7 @@ canvas{{width:100%!important;max-height:220px}}
 .tab-content{{display:none}}.tab-content.active{{display:block}}
 </style></head><body>
 
-<h1>Momentum Rotation Bot</h1>
+<h1>Multi-TF Momentum Bot</h1>
 <p class="subtitle">Live monitoring &middot; auto-refreshes every 2 min &middot; {now.strftime('%b %d %Y, %H:%M')} Stockholm</p>
 
 <!-- Row 1: Signal + Gateway + Next Run -->
@@ -329,7 +331,7 @@ canvas{{width:100%!important;max-height:220px}}
 <h2>Signal</h2>
 <div><span class="status-dot" style="background:{status_color}"></span><span class="status-label">{status_text}</span></div>
 <div class="status-detail">{status_detail}</div>
-<div style="color:#525252;font-size:.72rem;margin-top:6px">{sig_date} &middot; {days_in_regime} days in regime</div>
+<div style="color:#525252;font-size:.72rem;margin-top:6px">{sig_date} &middot; {days_in_regime} days &middot; Trend: {trend_strength:.0f}%</div>
 </div>
 
 <div class="card" style="text-align:center">
@@ -357,7 +359,7 @@ canvas{{width:100%!important;max-height:220px}}
 
 <!-- Row 2: SPY Chart (full width) -->
 <div class="card full" style="margin-bottom:14px">
-<h2>SPY vs SMA(100) Trend Filter</h2>
+<h2>SPY vs SMA(200) Trend Filter &mdash; Strength: {trend_strength:.0f}%</h2>
 <canvas id="spyChart" height="200"></canvas>
 </div>
 
@@ -376,7 +378,7 @@ canvas{{width:100%!important;max-height:220px}}
 <div class="grid">
 
 <div class="card">
-<h2>Momentum Rankings (20-day)</h2>
+<h2>Momentum Rankings (20+60+126d blend)</h2>
 <table><thead><tr><th>#</th><th>Symbol</th><th>Momentum</th><th class="num">Return</th></tr></thead>
 <tbody>{mom_rows if mom_rows else '<tr><td colspan="4" style="color:#525252">SPY below SMA &mdash; no rankings while in cash</td></tr>'}</tbody></table>
 </div>
