@@ -98,12 +98,8 @@ def load_vix(data_dir: str | Path = "data") -> pd.Series | None:
 
 def fetch_vix_live(lookback_days: int = 30) -> float | None:
     """Fetch the latest VIX close from Yahoo Finance."""
-    from datetime import datetime, timedelta
-    end = datetime.now()
-    start = end - timedelta(days=lookback_days)
     try:
-        df = yf.download(VIX_SYMBOL, start=start.strftime("%Y-%m-%d"),
-                         end=end.strftime("%Y-%m-%d"),
+        df = yf.download(VIX_SYMBOL, period=f"{lookback_days}d",
                          interval="1d", progress=False, auto_adjust=True)
         if df.empty:
             return None
